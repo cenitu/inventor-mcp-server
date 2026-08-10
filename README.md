@@ -25,7 +25,7 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 - Windows with **Autodesk Inventor** (developed on Inventor 2026, also verified on **Inventor 2027**; older versions may need enum adjustments — see [docs/inventor-api-notes.md](docs/inventor-api-notes.md))
 - **Python 3.12+**
-- `pip install "mcp[cli]" pywin32`
+- `pip install "mcp[cli]" pywin32` — MCP Python SDK **1.x and 2.x** are both supported (2.x renamed `FastMCP` to `MCPServer`; the server detects which is installed)
 
 ## Installation
 
@@ -82,7 +82,7 @@ constraints (29/29 pass on Inventor 2027).
 The `skills/` directory contains two [Agent Skills](https://code.claude.com/docs/en/skills) that teach Claude the workflow and the Inventor 2026 API quirks:
 
 - **inventor-modeling** — core patterns: units, sketch discipline, hole placement, sheet metal, diagnostic verification, common failure modes
-- **inventor-din-parts** — parametric recipes for DIN/ISO standard parts (hex nuts DIN 934, bolts DIN 933, washers DIN 125, flanges DIN 2573) with dimension tables
+- **inventor-din-parts** — parametric recipes for DIN/ISO standard parts (hex nuts DIN 934 / 439, bolts DIN 933, socket head cap screws DIN 912, countersunk screws DIN 7991, washers DIN 125, flanges DIN 2573) with dimension tables
 
 Install by copying into your skills directory:
 ```
@@ -104,7 +104,7 @@ Inventor's COM API documentation is wrong or silent about many things in recent 
 ## Architecture
 
 ```
-src/server.py        FastMCP server — tool definitions (stdio transport)
+src/server.py        MCP server (FastMCP / MCPServer) — tool definitions (stdio transport)
 src/inventor_api.py  InventorConnection — COM wrapper, all geometry logic (mm units)
 skills/              Agent Skills for Claude
 docs/                Hard-won API knowledge
