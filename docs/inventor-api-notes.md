@@ -180,6 +180,45 @@ with many holes. Avoid extrude-cuts for sheet metal — they hardcode the depth.
 **Flat Pattern** is the acid test: if it unfolds, your geometry is real sheet
 metal; extrude-built "walls" look identical but won't unfold.
 
+## Assembly (IAM)
+
+```python
+asm  = app.Documents.Add(12291, r"...\Metric\Standard (mm).iam", True)  # kAssemblyDocumentObject
+comp = asm.ComponentDefinition
+occ  = comp.Occurrences.Add(part_path, matrix)   # part must exist ON DISK
+occ.Grounded = True
+```
+
+- `Occurrences.Add` needs a **saved file** — an unsaved in-memory part cannot be
+  placed. Save the .ipt first.
+- The matrix is the placement transform; `matrix.SetTranslation(tg.CreateVector(x_cm, y_cm, z_cm))`.
+  Skip `SetTranslation` for the identity placement.
+- **Ground the first component.** Otherwise the solver satisfies constraints by
+  moving the part you consider fixed.
+
+### Constraints need geometry PROXIES
+
+```python
+wp    = occ.Definition.WorkPlanes.Item(3)     # part-level entity — WRONG to pass directly
+proxy = occ.CreateGeometryProxy(wp)           # assembly-context entity — use this
+comp.Constraints.AddMateConstraint(proxy1, proxy2, offset_cm)
+comp.Constraints.AddFlushConstraint(proxy1, proxy2, offset_cm)
+comp.Constraints.AddAngleConstraint(proxy1, proxy2, angle_RADIANS)
+comp.Constraints.AddInsertConstraint(circEdgeProxy1, circEdgeProxy2, axes_opposed, offset_cm)
+```
+
+- `CreateGeometryProxy` is documented as taking an out-parameter; under pywin32
+  **dynamic dispatch it simply returns the proxy**.
+- Angle constraints are in radians, like everything else.
+- Prefer origin planes/axes (`WorkPlanes.Item(1/2/3)` = YZ/XZ/XY, `WorkAxes.Item(1/2/3)`
+  = X/Y/Z) over picked faces: origin constraints survive part edits, face picks
+  break as soon as topology renumbers.
+- `AddInsertConstraint` wants **circular edges** — `Edge.GeometryType == 5124`
+  (`kCircleCurve`; straight edges are 5123). `edge.Geometry.Center` / `.Radius`
+  only exist on circular edges.
+- Call `doc.Update()` after adding or deleting a constraint, otherwise
+  `occ.Transformation` still reports the pre-solve position.
+
 ## Sketch-plane axis mapping
 
 | Plane | sketch X | sketch Y |

@@ -12,7 +12,8 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Features
 
-- **34 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (Face / Flange / Cut with Flat Pattern support), parameters
+- **47 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (Face / Flange / Cut with Flat Pattern support), parameters
+- **Assemblies (IAM)**: place components, ground them, constrain by origin geometry (mate / flush / angle) or drop a bolt into a hole with a single Insert constraint
 - **`execute_python` power tool** — run arbitrary Python against the live COM connection with a persistent namespace (escape hatch for anything not covered by dedicated tools)
 - **Auto-reporting** — every feature operation returns a volume/topology delta (`Hole1 | V 23497 (-503 mm³) | F7 E14`), so the AI can self-verify each step
 - **Transactions** — wrap multi-step builds, roll back everything with one call
@@ -71,6 +72,10 @@ renumbered enum in a future release shows up as a named failure instead of a cry
 COM error. Exit code = number of failed steps.
 
 Current results: **57/57 pass on Inventor 2027** (Python 3.12, mcp 2.0).
+
+`tests/assembly_smoke_test.py` does the same for the assembly tools — it builds a
+plate and a pin on disk, places them, and exercises mate / flush / angle / insert
+constraints (29/29 pass on Inventor 2027).
 
 ## Skills (optional, recommended)
 
