@@ -1,4 +1,10 @@
-# inventor-mcp
+# inventor-mcp-server
+
+> **Maintained continuation of [NeonGlay/inventor-mcp](https://github.com/NeonGlay/inventor-mcp).**
+> The original repository has had no activity since its initial release (June 2026), and fresh
+> installs there fail on MCP SDK 2.x. This repo carries the full original history plus the fixes
+> and features that were submitted upstream as PRs and never reviewed. If the original author
+> returns, everything here is available to be merged back. See [CHANGELOG.md](CHANGELOG.md).
 
 **MCP server for parametric 3D modeling in Autodesk Inventor — drive Inventor with Claude (or any MCP client) in natural language.**
 
@@ -31,7 +37,7 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 1. Clone this repository:
    ```
-   git clone https://github.com/NeonGlay/inventor-mcp.git
+   git clone https://github.com/cenitu/inventor-mcp-server.git
    ```
 
 2. Install dependencies:

@@ -6,7 +6,14 @@ try:
     from mcp.server import MCPServer as FastMCP
 except ImportError:  # SDK 1.x
     from mcp.server.fastmcp import FastMCP
-from . import inventor_api as _api
+try:
+    from . import inventor_api as _api
+except ImportError:
+    # Run as a script (`python src/server.py`), which is how most MCP clients
+    # launch it — there is no parent package, so import from this directory.
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import inventor_api as _api
 
 mcp = FastMCP(
     "Autodesk Inventor",

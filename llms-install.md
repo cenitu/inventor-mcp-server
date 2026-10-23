@@ -18,7 +18,7 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
 
 1. Clone the repository to a stable location (avoid paths that may be deleted):
    ```powershell
-   git clone https://github.com/NeonGlay/inventor-mcp.git
+   git clone https://github.com/cenitu/inventor-mcp-server.git
    cd inventor-mcp
    ```
 

@@ -1,12 +1,17 @@
 [project]
 name = "inventor-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for Autodesk Inventor parametric modeling"
 requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pywin32>=306",
 ]
+
+[project.urls]
+Homepage = "https://github.com/cenitu/inventor-mcp-server"
+Issues = "https://github.com/cenitu/inventor-mcp-server/issues"
+Upstream = "https://github.com/NeonGlay/inventor-mcp"
 
 [build-system]
 requires = ["setuptools>=68.0"]
