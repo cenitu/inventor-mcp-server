@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`set_sheet_metal_rule` / `list_sheet_metal_rules`** — activate a sheet metal rule by name
+  (case-insensitive), so thickness, bend radius and unfold method come from the shop's own rules
+  instead of overriding the thickness alone. Reports the resolved values
+  (`T15-V10 active: thickness 1.5 mm, bend radius 10 / 6 = 1.667 mm`); unknown names list what exists.
+
 ## 0.2.0 — first maintained release
 
 Continuation of [NeonGlay/inventor-mcp](https://github.com/NeonGlay/inventor-mcp) 0.1.0.

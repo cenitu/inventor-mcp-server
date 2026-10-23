@@ -152,6 +152,22 @@ tap = hf.CreateTapInfo(True, "ISO Metric profile", "M16x2", "6H", True)
 
 ## Sheet Metal (2026)
 
+### Activating a sheet metal rule
+
+`ComponentDefinition.ActiveSheetMetalStyle` is **read-only** — assigning a style
+to it raises `Property ... can not be set`. The style activates itself:
+
+```python
+styles = comp.SheetMetalStyles
+styles.Item("T15-V10").Activate()      # (by index; match .Name first)
+```
+
+A rule carries thickness, bend radius and unfold method together. `Thickness`
+and `BendRadius` are stored as *expressions* (`'1,5'`, `'10 / 6'`, `'Thickness'`);
+resolve them with `doc.UnitsOfMeasure.GetValueFromExpression(expr, "mm")`
+(returns **cm**). After activation the part's `comp.Thickness` Parameter holds
+the resolved thickness. Wrapped as `list_sheet_metal_rules` / `set_sheet_metal_rule`.
+
 ```python
 comp.ActiveSheetMetalStyle.Thickness = "0,8 mm"   # comma decimal on European locales
 ```

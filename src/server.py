@@ -492,8 +492,27 @@ def add_parameter(name: str, expression: str, units: str = "mm") -> str:
 
 @mcp.tool()
 def set_sheet_metal_thickness(thickness: float = 0.8) -> str:
-    """Set the active sheet metal style's thickness. Use after create_part(template="sheet_metal")."""
+    """Override the active sheet metal style's thickness. Use after create_part(template="sheet_metal").
+    If the shop has named rules (see list_sheet_metal_rules), use set_sheet_metal_rule instead —
+    changing only the thickness leaves the rule's bend radius and unfold method unmatched."""
     return inv.set_sheet_metal_thickness(thickness)
+
+
+@mcp.tool()
+def list_sheet_metal_rules() -> str:
+    """List the sheet metal rules available in the active sheet metal part
+    (name, thickness, bend radius, which one is active). Shops often encode
+    their tooling in rule names, e.g. 'T15-V10' = 1.5 mm sheet, V10 die."""
+    return json.dumps(inv.list_sheet_metal_rules(), indent=1, ensure_ascii=False)
+
+
+@mcp.tool()
+def set_sheet_metal_rule(name: str) -> str:
+    """Activate a sheet metal rule by name (case-insensitive). Sets thickness,
+    bend radius and unfold method together — prefer this over
+    set_sheet_metal_thickness whenever a matching rule exists.
+    Unknown names return the list of available rules."""
+    return inv.set_sheet_metal_rule(name)
 
 
 @mcp.tool()
