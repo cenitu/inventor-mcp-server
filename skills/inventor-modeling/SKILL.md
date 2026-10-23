@@ -139,7 +139,13 @@ When the user mentions "листовий метал", "sheet metal", thickness l
 
 ```python
 inv.create_part(template="sheet_metal", name="My_Enclosure")
-inv.set_sheet_metal_thickness(0.8)         # mm
+# If the template has named rules (shops encode tooling, e.g. 'T15-V10' =
+# 1.5 mm sheet, V10 die), ALWAYS pick the rule — it sets thickness, bend
+# radius and unfold method together, so the flat pattern matches the brake:
+inv.list_sheet_metal_rules()                # see what exists
+inv.set_sheet_metal_rule("T08-V08")         # case-insensitive
+# Only when no matching rule exists, override the thickness alone:
+# inv.set_sheet_metal_thickness(0.8)        # mm
 
 # Base panel (the bottom / first flat piece)
 inv.create_sketch("XY")

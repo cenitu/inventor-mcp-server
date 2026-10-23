@@ -1123,6 +1123,66 @@ class InventorConnection:
             style.Thickness = f"{thickness_mm:.3f} mm"
         return f"Sheet metal thickness set to {thickness_mm}mm (style: {style.Name})"
 
+    def list_sheet_metal_rules(self) -> list[dict]:
+        """Sheet metal rules (styles) available in the active part.
+
+        Rules come from the template / style library, so a shop's own rules
+        (e.g. 'T15-V10' = 1.5 mm with a V10 die) show up here. Thickness and
+        bend radius are returned as Inventor expressions, exactly as stored.
+        """
+        comp = self.active_part()
+        if not hasattr(comp, "SheetMetalStyles"):
+            raise RuntimeError("Active part is not a sheet metal part. "
+                               "Use create_part(template='sheet_metal').")
+        active = comp.ActiveSheetMetalStyle.Name
+        rules = []
+        styles = comp.SheetMetalStyles
+        for i in range(1, styles.Count + 1):
+            s = styles.Item(i)
+            try:
+                radius = s.BendRadius
+            except Exception:
+                radius = None
+            rules.append({"name": s.Name, "thickness": s.Thickness,
+                          "bend_radius": radius, "active": s.Name == active})
+        return rules
+
+    def set_sheet_metal_rule(self, name: str) -> str:
+        """Activate a sheet metal rule by name (case-insensitive).
+
+        Prefer this over set_sheet_metal_thickness when the shop has its own
+        rules: a rule carries thickness, bend radius AND unfold method together,
+        so flat patterns match the real press brake.
+
+        NOTE: ComponentDefinition.ActiveSheetMetalStyle is READ-ONLY —
+        assigning to it raises. The style activates itself via .Activate().
+        """
+        comp = self.active_part()
+        if not hasattr(comp, "SheetMetalStyles"):
+            raise RuntimeError("Active part is not a sheet metal part. "
+                               "Use create_part(template='sheet_metal').")
+        styles = comp.SheetMetalStyles
+        names = [styles.Item(i).Name for i in range(1, styles.Count + 1)]
+        match = next((i for i, n in enumerate(names, 1) if n.lower() == name.lower()), None)
+        if match is None:
+            raise ValueError(f"Sheet metal rule '{name}' not found. Available: {', '.join(names)}")
+        styles.Item(match).Activate()
+        s = comp.ActiveSheetMetalStyle
+        try:
+            thickness_mm = comp.Thickness.Value * 10   # resolved Parameter, cm -> mm
+            t = f"{thickness_mm:g} mm"
+        except Exception:
+            t = s.Thickness
+        radius = s.BendRadius
+        try:
+            # Expression may reference other parameters ('Thickness', '10 / 6');
+            # resolve it now that this rule is the active one. Result is in cm.
+            r_mm = self.active_document().UnitsOfMeasure.GetValueFromExpression(radius, "mm") * 10
+            radius = f"{radius} = {r_mm:.3f} mm"
+        except Exception:
+            pass
+        return f"Sheet metal rule '{s.Name}' active: thickness {t}, bend radius {radius}"
+
     def sheet_metal_face(self, sketch_index: int | None = None) -> str:
         """Create a base sheet-metal Face from a closed sketch profile.
         Equivalent of the 'Face' command in Inventor Sheet Metal UI.

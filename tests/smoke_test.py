@@ -120,6 +120,16 @@ def _raise(msg):
     raise AssertionError(msg)
 
 
+def _expect_error(fn, fragment):
+    try:
+        fn()
+    except Exception as e:
+        if fragment in str(e):
+            return f"raised: {str(e)[:80]}"
+        raise AssertionError(f"wrong error: {e}")
+    raise AssertionError("expected an error, got none")
+
+
 def part_tests(inv, run):
     run.step("create_part(metric)", lambda: inv.create_part("smoke_part"))
     run.step("create_sketch(XY)", lambda: inv.create_sketch("XY"))
@@ -164,6 +174,18 @@ def part_tests(inv, run):
 
 def sheet_metal_tests(inv, run):
     run.step("create_part(sheet_metal)", lambda: inv.create_part("smoke_sm", "sheet_metal"))
+    rules = run.step("list_sheet_metal_rules", lambda: inv.list_sheet_metal_rules())
+    if rules:
+        # Use whatever rule the template ships (stock: Default_mm; shops: their own),
+        # in a different case to exercise the case-insensitive match.
+        first = rules[0]["name"]
+        run.step(f"set_sheet_metal_rule({first.upper()!r})",
+                 lambda: inv.set_sheet_metal_rule(first.upper()))
+        run.step("active rule switched",
+                 lambda: first if inv.active_part().ActiveSheetMetalStyle.Name == first
+                 else _raise("rule did not become active"))
+    run.step("set_sheet_metal_rule(unknown) raises",
+             lambda: _expect_error(lambda: inv.set_sheet_metal_rule("NO_SUCH_RULE"), "not found"))
     run.step("set_sheet_metal_thickness", lambda: inv.set_sheet_metal_thickness(2))
     run.step("create_sketch(XY) sm", lambda: inv.create_sketch("XY"))
     run.step("draw_rectangle sm", lambda: inv.draw_rectangle(0, 0, 100, 60))
