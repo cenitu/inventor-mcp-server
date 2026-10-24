@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+- **Smoke test no longer closes your documents.** It used to close *every* open document without
+  saving when it finished, discarding unsaved work. It now records what was open before it ran and
+  closes only the scratch documents it created (documents referenced by open assemblies are
+  protected too).
+
+### Verified
+- Inventor **2027.1**: smoke test 61/61.
+
 ### Added
 - **`set_sheet_metal_rule` / `list_sheet_metal_rules`** — activate a sheet metal rule by name
   (case-insensitive), so thickness, bend radius and unfold method come from the shop's own rules
