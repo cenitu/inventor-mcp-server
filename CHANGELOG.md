@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **MCP client config in the docs.** README, `.mcp.json.example` and `llms-install.md` recommended
+  `-m src.server` with `"cwd"`; Claude Code ignores `cwd`, so the server failed with
+  `No module named 'src'` and the client only showed `Connection closed`. The docs now register the
+  server by the absolute path to `src/server.py`, and *Common issues* explains the failure
+  (related: NeonGlay/inventor-mcp#9).
 - **Smoke test no longer closes your documents.** It used to close *every* open document without
   saving when it finished, discarding unsaved work. It now records what was open before it ran and
   closes only the scratch documents it created (documents referenced by open assemblies are
