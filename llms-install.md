@@ -5,7 +5,7 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
 ## Prerequisites check
 
 1. **Windows only** — this server drives Autodesk Inventor through COM; it cannot work on macOS/Linux.
-2. **Autodesk Inventor** must be installed (2026 recommended; 2024/2025 may work with enum differences). Verify:
+2. **Autodesk Inventor** must be installed (verified on 2026, 2027 and 2027.1; 2024/2025 may work with enum differences). Verify:
    ```powershell
    Test-Path "C:\Program Files\Autodesk"
    ```
@@ -19,7 +19,7 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
 1. Clone the repository to a stable location (avoid paths that may be deleted):
    ```powershell
    git clone https://github.com/cenitu/inventor-mcp-server.git
-   cd inventor-mcp
+   cd inventor-mcp-server
    ```
 
 2. Install Python dependencies:
@@ -28,14 +28,15 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
    ```
 
 3. Register the MCP server in the client's MCP configuration. The server uses
-   **stdio** transport. Configuration (adjust `cwd` to the actual clone path):
+   **stdio** transport. Point `args` at the **absolute path** of `src/server.py`
+   in the clone (do NOT use `"cwd"` + `-m src.server` — Claude Code ignores
+   `cwd`, the module isn't found and the client only reports `Connection closed`):
    ```json
    {
      "mcpServers": {
        "inventor": {
          "command": "python",
-         "args": ["-m", "src.server"],
-         "cwd": "C:/path/to/inventor-mcp"
+         "args": ["C:/path/to/inventor-mcp-server/src/server.py"]
        }
      }
    }
@@ -46,7 +47,7 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
 
 4. Verify: restart the MCP client, then start Autodesk Inventor (the server
    connects to a **running** Inventor instance). Call the `connect` tool —
-   expected response: `Connected to running Inventor 2026`.
+   expected response: `Connected to running Inventor <version>`.
 
 ## Smoke test
 
@@ -57,6 +58,12 @@ Ask the agent to run:
 4. `inspect` → should show one extrusion, volume ≈ 19 635 mm³
 
 ## Common issues
+
+- **`Connection closed` / server failed to connect** — the client couldn't start
+  the server process. Run the exact `command` + `args` from the config in a
+  terminal from a *different* directory; it should wait silently for input.
+  `No module named 'src'` means the config uses `-m src.server` with `cwd`
+  (unsupported by Claude Code) — switch to the absolute script path.
 
 - **`Cannot connect to Inventor`** — Inventor isn't running. Start it first (the
   server attaches to the active instance; it can also launch one, but attaching
