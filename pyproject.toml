@@ -1,25 +1,42 @@
 [project]
 name = "inventor-mcp-server"
-version = "0.2.0"
-description = "MCP server for Autodesk Inventor parametric modeling"
+version = "0.3.0"
+description = "MCP server for parametric 3D modeling in Autodesk Inventor (parts, sheet metal, assemblies)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "inventor-mcp contributors" }]
+keywords = ["mcp", "model-context-protocol", "autodesk-inventor", "cad", "sheet-metal", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Manufacturing",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Computer Aided Design (CAD)",
+]
 dependencies = [
     "mcp[cli]>=1.0.0",
-    "pywin32>=306",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.urls]
 Homepage = "https://github.com/cenitu/inventor-mcp-server"
 Issues = "https://github.com/cenitu/inventor-mcp-server/issues"
+Changelog = "https://github.com/cenitu/inventor-mcp-server/blob/main/CHANGELOG.md"
 Upstream = "https://github.com/NeonGlay/inventor-mcp"
 
+[project.scripts]
+inventor-mcp-server = "inventor_mcp_server.server:main"
+inventor-mcp = "inventor_mcp_server.server:main"   # old name, kept for existing setups
+
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
-
-[project.scripts]
-inventor-mcp = "src.server:main"
+include = ["inventor_mcp_server*"]

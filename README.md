@@ -49,21 +49,33 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
    pip install "mcp[cli]" pywin32
    ```
 
-3. Register the server with your MCP client. For Claude Code, add to `.mcp.json` in your project root (see `.mcp.json.example`). Use the **absolute path** to `src/server.py`:
+3. Register the server with your MCP client. For Claude Code, add to `.mcp.json` in your project root (see `.mcp.json.example`). Use the **absolute path** to `inventor_mcp_server/server.py`:
    ```json
    {
      "mcpServers": {
        "inventor": {
          "command": "python",
-         "args": ["C:/path/to/inventor-mcp-server/src/server.py"]
+         "args": ["C:/path/to/inventor-mcp-server/inventor_mcp_server/server.py"]
        }
      }
    }
    ```
 
-   > **Don't use `"cwd"` with `-m src.server`.** Claude Code ignores `cwd` and starts the server from
-   > your project root, where `src` can't be found — the process exits immediately and the client only
+   > **Don't use `"cwd"` with `-m inventor_mcp_server`.** Claude Code ignores `cwd` and starts the server from
+   > your project root, where the package can't be found — the process exits immediately and the client only
    > reports `Connection closed`. Pointing at the script by absolute path works from any directory.
+
+   > Configs written for 0.2.x that point at `src/server.py` still work — that file now forwards to the
+   > `inventor_mcp_server` package — but please update them; the shim will be removed in a later release.
+
+   **Alternatively, install it as a package** — no clone needed, and the config gets a plain command:
+   ```
+   pip install git+https://github.com/cenitu/inventor-mcp-server.git
+   ```
+   ```json
+   { "mcpServers": { "inventor": { "command": "inventor-mcp-server" } } }
+   ```
+   (If your MCP client can't find the command, use the full path printed by `where inventor-mcp-server`.)
 
 4. Restart the MCP client (MCP servers load at session start), start Inventor, then ask your AI assistant to build something.
 
@@ -117,8 +129,8 @@ Inventor's COM API documentation is wrong or silent about many things in recent 
 ## Architecture
 
 ```
-src/server.py        MCP server (FastMCP / MCPServer) — tool definitions (stdio transport)
-src/inventor_api.py  InventorConnection — COM wrapper, all geometry logic (mm units)
+inventor_mcp_server/server.py        MCP server (FastMCP / MCPServer) — tool definitions (stdio transport)
+inventor_mcp_server/inventor_api.py  InventorConnection — COM wrapper, all geometry logic (mm units)
 skills/              Agent Skills for Claude
 docs/                Hard-won API knowledge
 ```

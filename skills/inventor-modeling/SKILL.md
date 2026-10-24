@@ -434,8 +434,8 @@ Designation format: **integer pitches drop the decimal** — `M16x2` not `M16x2.
 
 | | Path |
 |---|---|
-| MCP server | `src/server.py` |
-| API wrapper | `src/inventor_api.py` |
+| MCP server | `inventor_mcp_server/server.py` |
+| API wrapper | `inventor_mcp_server/inventor_api.py` |
 
 | Templates | `app.FileLocations.TemplatesPath` (auto-resolved) |
 | Thread DB | `C:\Users\Public\Documents\Autodesk\Inventor 2026\Design Data\XLS\en-US\thread.xlsx` |
