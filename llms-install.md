@@ -51,6 +51,17 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
      If that file already has other servers, add `inventor` next to them.
    - Claude Desktop: add to `claude_desktop_config.json`
 
+   **Save config files as UTF-8 *without* a BOM.** Clients parse them with a
+   strict JSON parser; a file starting with a BOM (bytes `EF BB BF`) is treated
+   as empty and the server silently never appears. Windows PowerShell 5.1 adds a
+   BOM with `Set-Content -Encoding utf8`, `Out-File` and `>`. Prefer your
+   file-editing tool, or write with:
+   ```powershell
+   [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding $false))
+   ```
+   To check: `(Get-Content $path -Encoding Byte -TotalCount 3) -join ' '` must
+   start with `123` (`{`); `239 187 191` means a BOM.
+
 4. Verify: restart the MCP client (in VS Code: *Developer: Reload Window*),
    then start Autodesk Inventor (the server
    connects to a **running** Inventor instance). Call the `connect` tool —
