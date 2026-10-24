@@ -32,6 +32,10 @@ jobs:
         # Block scalar: a plain `run:` value may not contain ": " (YAML would read a new key).
         run: |
           grep -q "mcp-name: io.github.cenitu/inventor-mcp-server" README.md
+      - name: PyPI classifiers are valid
+        run: |
+          python -m pip install trove-classifiers
+          python -c "import tomllib; from trove_classifiers import classifiers as ok; bad = [c for c in tomllib.load(open('pyproject.toml', 'rb'))['project']['classifiers'] if c not in ok]; print('classifiers OK' if not bad else bad); raise SystemExit(1 if bad else 0)"
       - name: Build
         run: |
           python -m pip install --upgrade build
