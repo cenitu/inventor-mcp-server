@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+- **Package renamed `src` → `inventor_mcp_server`**, so the project can be published to PyPI
+  (installing it used to put a top-level module called `src` into site-packages). New entry points:
+  `inventor_mcp_server/server.py`, `python -m inventor_mcp_server`, and the `inventor-mcp-server`
+  command after `pip install`. Full packaging metadata (license, classifiers, Windows-only `pywin32`).
+- **Deprecated, still working:** `src/server.py` and `src.inventor_api` now forward to the new package,
+  so 0.2.x MCP configs and scripts keep running. They will be removed in a later release.
+
 ### Fixed
 - **MCP client config in the docs.** README, `.mcp.json.example` and `llms-install.md` recommended
   `-m src.server` with `"cwd"`; Claude Code ignores `cwd`, so the server failed with

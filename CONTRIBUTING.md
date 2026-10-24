@@ -24,10 +24,10 @@ Requirements: Windows, Autodesk Inventor, Python 3.12+.
 ```
 git clone https://github.com/cenitu/inventor-mcp-server.git
 cd inventor-mcp-server
-pip install "mcp[cli]" pywin32
+pip install -e .
 ```
 
-Register the server in your MCP client by the **absolute path** to `src/server.py`
+Register the server in your MCP client by the **absolute path** to `inventor_mcp_server/server.py`
 (see the README — don't use `"cwd"`).
 
 > **Never call `win32com.client.gencache.EnsureDispatch`** against the same Python install.
@@ -38,8 +38,8 @@ Register the server in your MCP client by the **absolute path** to `src/server.p
 
 | Path | What lives there |
 |---|---|
-| `src/inventor_api.py` | `InventorConnection` — all COM / geometry logic, **millimetre** interface |
-| `src/server.py` | MCP tool definitions — thin wrappers that parse arguments and call the API |
+| `inventor_mcp_server/inventor_api.py` | `InventorConnection` — all COM / geometry logic, **millimetre** interface |
+| `inventor_mcp_server/server.py` | MCP tool definitions — thin wrappers that parse arguments and call the API |
 | `tests/check_server.py` | Checks that need no Inventor (runs in CI) |
 | `tests/smoke_test.py` | Live test against a real Inventor — every geometry path once |
 | `docs/inventor-api-notes.md` | Field notes on API quirks — **read this first** |
@@ -47,7 +47,7 @@ Register the server in your MCP client by the **absolute path** to `src/server.p
 
 ## Fast iteration
 
-Edit `src/inventor_api.py`, then call the **`reload_api`** tool from your MCP client — the new code
+Edit `inventor_mcp_server/inventor_api.py`, then call the **`reload_api`** tool from your MCP client — the new code
 is loaded without restarting the client, and the COM connection is kept. For experiments, the
 **`execute_python`** tool runs code against the live connection (`inv`, `app`, `doc`, `comp`,
 `body`, `tg` are pre-bound).
@@ -57,8 +57,8 @@ degrees and convert.
 
 ## Adding or changing a tool
 
-1. Put the logic in `InventorConnection` (`src/inventor_api.py`), taking mm / degrees.
-2. Add a thin `@mcp.tool()` wrapper in `src/server.py`. The docstring is what the AI reads —
+1. Put the logic in `InventorConnection` (`inventor_mcp_server/inventor_api.py`), taking mm / degrees.
+2. Add a thin `@mcp.tool()` wrapper in `inventor_mcp_server/server.py`. The docstring is what the AI reads —
    say what the tool does, the units, and when to prefer it over a similar tool.
 3. Return something the AI can verify. Feature operations should include the volume / topology
    delta (`self._fmt_delta(before)`), so a feature that silently did nothing is visible.

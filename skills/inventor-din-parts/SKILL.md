@@ -128,7 +128,7 @@ Across flats `s` is identical to DIN 934; only the height differs.
 """DIN 934 hex nut — parametric. Pass thread spec, get the part."""
 import sys, os, math
 sys.path.insert(0, r"C:\path	o\inventor-mcp")  # repo root
-from src.inventor_api import InventorConnection
+from inventor_mcp_server.inventor_api import InventorConnection
 
 # === DIMENSIONS ===
 thread = "M16"               # ← change this

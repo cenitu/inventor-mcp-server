@@ -28,15 +28,15 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
    ```
 
 3. Register the MCP server in the client's MCP configuration. The server uses
-   **stdio** transport. Point `args` at the **absolute path** of `src/server.py`
-   in the clone (do NOT use `"cwd"` + `-m src.server` — Claude Code ignores
+   **stdio** transport. Point `args` at the **absolute path** of `inventor_mcp_server/server.py`
+   in the clone (do NOT use `"cwd"` + `-m inventor_mcp_server` — Claude Code ignores
    `cwd`, the module isn't found and the client only reports `Connection closed`):
    ```json
    {
      "mcpServers": {
        "inventor": {
          "command": "python",
-         "args": ["C:/path/to/inventor-mcp-server/src/server.py"]
+         "args": ["C:/path/to/inventor-mcp-server/inventor_mcp_server/server.py"]
        }
      }
    }
@@ -62,7 +62,7 @@ Ask the agent to run:
 - **`Connection closed` / server failed to connect** — the client couldn't start
   the server process. Run the exact `command` + `args` from the config in a
   terminal from a *different* directory; it should wait silently for input.
-  `No module named 'src'` means the config uses `-m src.server` with `cwd`
+  `No module named 'inventor_mcp_server'` (or `'src'` in older setups) means the config uses `-m ...` with `cwd`
   (unsupported by Claude Code) — switch to the absolute script path.
 
 - **`Cannot connect to Inventor`** — Inventor isn't running. Start it first (the

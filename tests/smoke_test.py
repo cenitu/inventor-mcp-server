@@ -17,7 +17,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src import inventor_api as api  # noqa: E402
+from inventor_mcp_server import inventor_api as api  # noqa: E402
 
 
 class Runner:

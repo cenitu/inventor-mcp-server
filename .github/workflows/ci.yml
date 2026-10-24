@@ -28,6 +28,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install "mcp[cli]${{ matrix.mcp }}" pywin32
       - name: Byte-compile
-        run: python -m compileall -q src tests
+        run: python -m compileall -q inventor_mcp_server src tests
       - name: Server checks
         run: python -X utf8 tests/check_server.py
+      - name: Wheel contains only the package
+        # Guards against publishing a top-level `src` (or tests/skills) module to PyPI.
+        run: |
+          python -m pip wheel . --no-deps -q -w dist
+          python -c "import glob, zipfile; tops = {n.split('/')[0] for n in zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()}; extra = {t for t in tops if t != 'inventor_mcp_server' and not t.endswith('.dist-info')}; print('wheel top-level:', sorted(tops)); raise SystemExit(f'unexpected: {extra}' if extra else 0)"

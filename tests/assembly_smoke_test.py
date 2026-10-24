@@ -17,7 +17,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 
-from src import inventor_api as api  # noqa: E402
+from inventor_mcp_server import inventor_api as api  # noqa: E402
 from smoke_test import Runner  # noqa: E402
 
 

@@ -3,7 +3,9 @@
     python tests/check_server.py
 
 - the server imports both ways MCP clients launch it
-  (`python -m src.server` package import, and `python src/server.py` script import)
+  (`python -m inventor_mcp_server` package import, and
+  `python inventor_mcp_server/server.py` script import)
+- the deprecated `src/` shims still forward to the package (0.2.x configs)
 - every tool has a description (it is what the AI client reads)
 - the tool count advertised in README.md matches reality
 
@@ -34,16 +36,26 @@ def tools_of(module):
 
 
 print("Server import:")
-pkg = importlib.import_module("src.server")
+pkg = importlib.import_module("inventor_mcp_server.server")
 pkg_tools = tools_of(pkg)
-check("package import (python -m src.server)", len(pkg_tools) > 0, f"{len(pkg_tools)} tools")
+check("package import (python -m inventor_mcp_server)", len(pkg_tools) > 0, f"{len(pkg_tools)} tools")
 
-spec = importlib.util.spec_from_file_location("server_as_script", os.path.join(ROOT, "src", "server.py"))
+spec = importlib.util.spec_from_file_location(
+    "server_as_script", os.path.join(ROOT, "inventor_mcp_server", "server.py"))
 script = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(script)
 script_tools = tools_of(script)
-check("script import (python src/server.py)", len(script_tools) == len(pkg_tools),
+check("script import (python inventor_mcp_server/server.py)", len(script_tools) == len(pkg_tools),
       f"{len(script_tools)} tools")
+
+print("Deprecated src/ shims:")
+spec = importlib.util.spec_from_file_location("legacy_server", os.path.join(ROOT, "src", "server.py"))
+legacy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(legacy)
+check("src/server.py forwards to the package", legacy.main is pkg.main)
+legacy_api = importlib.import_module("src.inventor_api")
+check("src.inventor_api is the package module",
+      legacy_api is importlib.import_module("inventor_mcp_server.inventor_api"))
 
 print("Tools:")
 names = [t.name for t in pkg_tools]
