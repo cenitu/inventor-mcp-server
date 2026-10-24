@@ -42,10 +42,17 @@ Step-by-step setup of the inventor-mcp server. Follow in order.
    }
    ```
    - Claude Code: add to `.mcp.json` in the project root
-   - Cline: add to `cline_mcp_settings.json`
+   - Cline: add to `cline_mcp_settings.json`. **Cline 4.x reads
+     `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`**; older
+     versions used `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json`.
+     Writing to the wrong one fails silently (the server just never appears).
+     If unsure, the file Cline actually uses is the one opened by
+     *MCP Servers → Edit Configuration* — or write to the `.cline` path first.
+     If that file already has other servers, add `inventor` next to them.
    - Claude Desktop: add to `claude_desktop_config.json`
 
-4. Verify: restart the MCP client, then start Autodesk Inventor (the server
+4. Verify: restart the MCP client (in VS Code: *Developer: Reload Window*),
+   then start Autodesk Inventor (the server
    connects to a **running** Inventor instance). Call the `connect` tool —
    expected response: `Connected to running Inventor <version>`.
 
