@@ -9,7 +9,7 @@ except ImportError:  # SDK 1.x
 try:
     from . import inventor_api as _api
 except ImportError:
-    # Run as a script (`python src/server.py`), which is how most MCP clients
+    # Run as a script (`python inventor_mcp_server/server.py`), which is how most MCP clients
     # launch it — there is no parent package, so import from this directory.
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
