@@ -17,6 +17,10 @@
 - Inventor **2027.1**: smoke test 61/61.
 
 ### Added
+- **Contributor setup** — `CONTRIBUTING.md`, issue templates (bug report, feature request,
+  Inventor version test report), PR template, and CI on Windows that checks the server imports
+  both ways clients launch it on MCP SDK 1.x and 2.x, every tool has a description and the README
+  tool count is current (`tests/check_server.py`, no Inventor needed).
 - **`set_sheet_metal_rule` / `list_sheet_metal_rules`** — activate a sheet metal rule by name
   (case-insensitive), so thickness, bend radius and unfold method come from the shop's own rules
   instead of overriding the thickness alone. Reports the resolved values

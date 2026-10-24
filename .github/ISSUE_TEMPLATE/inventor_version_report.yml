@@ -1,0 +1,25 @@
+name: Inventor version test report
+description: Ran the smoke test on your Inventor version? Share the result
+title: "Smoke test on Inventor <version>"
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `python -X utf8 tests/smoke_test.py` with Inventor open (your own open documents are left
+        untouched) and paste the output. Reports for versions not yet listed in the README are
+        especially welcome — failures included.
+  - type: input
+    id: inventor
+    attributes:
+      label: Inventor version
+      placeholder: "2025.3"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Smoke test output
+      render: text
+    validations:
+      required: true

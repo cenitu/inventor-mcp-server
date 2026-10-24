@@ -1,0 +1,27 @@
+name: Feature request
+description: A tool or capability you'd like the server to have
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What do you want to build?
+      description: Describe the real part / assembly / drawing task, not just the API call.
+    validations:
+      required: true
+  - type: textarea
+    id: missing
+    attributes:
+      label: What's missing today?
+      description: Which tool is missing or insufficient? Did `execute_python` work as a workaround?
+  - type: textarea
+    id: api
+    attributes:
+      label: Inventor API hints (optional)
+      description: Relevant API objects or methods, if you know them.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to implement this myself

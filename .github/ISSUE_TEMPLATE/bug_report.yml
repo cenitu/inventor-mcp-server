@@ -1,0 +1,40 @@
+name: Bug report
+description: Something doesn't work — a tool fails, crashes, or produces wrong geometry
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The exact COM error and your Inventor version make bugs fixable —
+        Inventor's API behaves differently between releases.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Which tool / call did you run, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      description: The full error or traceback returned by the tool (COM errors included).
+      render: text
+  - type: input
+    id: inventor
+    attributes:
+      label: Inventor version
+      description: Shown by the `connect` tool, e.g. "2027.1"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python / mcp versions and MCP client
+      placeholder: "Python 3.12.7, mcp 2.0.0, Claude Code"
+  - type: textarea
+    id: smoke
+    attributes:
+      label: Smoke test result (optional but very helpful)
+      description: Output of `python -X utf8 tests/smoke_test.py` — at least the summary and FAIL lines.
+      render: text
