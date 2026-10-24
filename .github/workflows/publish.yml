@@ -1,0 +1,80 @@
+name: Publish
+
+# Runs when a version tag is pushed, e.g. `git tag v0.3.0 && git push --tags`
+# (or when a GitHub release creates that tag).
+#   1. build      — check the tag matches pyproject.toml and server.json, build sdist + wheel
+#   2. pypi       — upload with PyPI trusted publishing (no API token stored anywhere)
+#   3. registry   — publish server.json to the official MCP Registry (GitHub OIDC login)
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag, pyproject.toml and server.json versions must match
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PY=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          SJ=$(python -c "import json; d=json.load(open('server.json')); print(d['version'])")
+          SP=$(python -c "import json; d=json.load(open('server.json')); print(d['packages'][0]['version'])")
+          echo "tag=$TAG pyproject=$PY server.json=$SJ server.json package=$SP"
+          [ "$TAG" = "$PY" ] && [ "$TAG" = "$SJ" ] && [ "$TAG" = "$SP" ] || { echo "::error::version mismatch"; exit 1; }
+      - name: README carries the MCP Registry ownership marker
+        run: grep -q "mcp-name: io.github.cenitu/inventor-mcp-server" README.md
+      - name: Build
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/inventor-mcp-server/
+    permissions:
+      id-token: write   # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  registry:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # GitHub OIDC login to the MCP Registry
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Wait until PyPI serves the new version
+        # The registry verifies the package on PyPI; a fresh upload can take a minute to appear.
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 20); do
+            curl -sf "https://pypi.org/pypi/inventor-mcp-server/$V/json" > /dev/null && { echo "PyPI has $V"; exit 0; }
+            echo "waiting for PyPI ($i)…"; sleep 15
+          done
+          echo "::error::version $V not visible on PyPI"; exit 1
+      - name: Log in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

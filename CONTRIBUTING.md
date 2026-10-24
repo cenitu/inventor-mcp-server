@@ -80,6 +80,19 @@ test** — please include your Inventor version.
 
 Style: match the surrounding code (naming, comment density, docstrings). One topic per PR.
 
+## Releasing (maintainers)
+
+1. Set the same version in `pyproject.toml` (`version`) and `server.json` (`version` and
+   `packages[0].version`), and move *Unreleased* in `CHANGELOG.md` under that version.
+2. Merge that to `main`, then tag it: `git tag v0.3.0 && git push maintained v0.3.0`
+   (or create a GitHub release with that tag).
+3. The **Publish** workflow checks the three versions match, builds, uploads to PyPI via trusted
+   publishing (the `pypi` environment asks a maintainer to approve), then publishes `server.json`
+   to the MCP Registry.
+
+A version number can be uploaded to PyPI only once — if something is wrong after the upload,
+fix it and release the next patch version.
+
 ## License
 
 By contributing you agree that your contributions are licensed under the MIT License.

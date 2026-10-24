@@ -25,6 +25,9 @@
 - Inventor **2027.1**: smoke test 61/61.
 
 ### Added
+- **Published on PyPI and the official MCP Registry** (`io.github.cenitu/inventor-mcp-server`):
+  `pip install inventor-mcp-server`. Tagging `v*` runs the new Publish workflow (version checks,
+  PyPI trusted publishing, MCP Registry via GitHub OIDC).
 - **Contributor setup** — `CONTRIBUTING.md`, issue templates (bug report, feature request,
   Inventor version test report), PR template, and CI on Windows that checks the server imports
   both ways clients launch it on MCP SDK 1.x and 2.x, every tool has a description and the README
