@@ -1,5 +1,9 @@
 # inventor-mcp-server
 
+[![CI](https://github.com/cenitu/inventor-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/cenitu/inventor-mcp-server/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 > **Maintained continuation of [NeonGlay/inventor-mcp](https://github.com/NeonGlay/inventor-mcp).**
 > The original repository has had no activity since its initial release (June 2026), and fresh
 > installs there fail on MCP SDK 2.x. This repo carries the full original history plus the fixes
@@ -121,11 +125,16 @@ docs/                Hard-won API knowledge
 
 ## Contributing
 
-Contributions welcome! Especially valuable:
-- Testing on Inventor 2024/2025 (enum values may differ — please report)
-- Assembly (IAM) and drawing (IDW) support
+Contributions welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, the fast
+edit → `reload_api` loop, and how to add a tool. Especially valuable:
+- **Testing on Inventor 2024/2025** — run `tests/smoke_test.py` and file an
+  *Inventor version test report* (no code needed)
+- Drawing (IDW) support, and more modeling tools (shell, loft, sweep)
 - More DIN/ISO part recipes
 - Bug reports with the exact COM error and Inventor version
+
+Start with a [`good first issue`](https://github.com/cenitu/inventor-mcp-server/labels/good%20first%20issue),
+or ask and share what you built in [Discussions](https://github.com/cenitu/inventor-mcp-server/discussions).
 
 ## License
 
