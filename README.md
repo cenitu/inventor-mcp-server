@@ -45,20 +45,23 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
    pip install "mcp[cli]" pywin32
    ```
 
-3. Register the server with your MCP client. For Claude Code, add to `.mcp.json` in your project root (see `.mcp.json.example`):
+3. Register the server with your MCP client. For Claude Code, add to `.mcp.json` in your project root (see `.mcp.json.example`). Use the **absolute path** to `src/server.py`:
    ```json
    {
      "mcpServers": {
        "inventor": {
          "command": "python",
-         "args": ["-m", "src.server"],
-         "cwd": "C:/path/to/inventor-mcp"
+         "args": ["C:/path/to/inventor-mcp-server/src/server.py"]
        }
      }
    }
    ```
 
-4. Start Inventor, then ask your AI assistant to build something.
+   > **Don't use `"cwd"` with `-m src.server`.** Claude Code ignores `cwd` and starts the server from
+   > your project root, where `src` can't be found — the process exits immediately and the client only
+   > reports `Connection closed`. Pointing at the script by absolute path works from any directory.
+
+4. Restart the MCP client (MCP servers load at session start), start Inventor, then ask your AI assistant to build something.
 
 > **Do NOT use `win32com.client.gencache.EnsureDispatch`** in your own scripts against the same Python install — the generated `gen_py` cache breaks `GetActiveObject`. If it happens: delete `%LOCALAPPDATA%\Temp\gen_py`. See the API notes for the full story.
 
