@@ -1,5 +1,8 @@
 # inventor-mcp-server
 
+<!-- mcp-name: io.github.cenitu/inventor-mcp-server -->
+
+[![PyPI](https://img.shields.io/pypi/v/inventor-mcp-server.svg)](https://pypi.org/project/inventor-mcp-server/)
 [![CI](https://github.com/cenitu/inventor-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/cenitu/inventor-mcp-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
