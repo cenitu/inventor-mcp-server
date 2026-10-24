@@ -69,7 +69,7 @@ Inventor and reports PASS/FAIL per step — the quickest way to qualify a new In
 release or verify your install:
 
 ```
-python tests/smoke_test.py            # starts Inventor if needed, closes scratch docs after
+python tests/smoke_test.py            # starts Inventor if needed; closes only the docs it created
 python tests/smoke_test.py --keep     # leave the test documents open for inspection
 ```
 
@@ -77,7 +77,7 @@ It also checks every hard-coded enum constant against the live COM type library,
 renumbered enum in a future release shows up as a named failure instead of a cryptic
 COM error. Exit code = number of failed steps.
 
-Current results: **61/61 pass on Inventor 2027** (Python 3.12, mcp 2.0).
+Current results: **61/61 pass on Inventor 2027 and 2027.1** (Python 3.12, mcp 2.0).
 
 `tests/assembly_smoke_test.py` does the same for the assembly tools — it builds a
 plate and a pin on disk, places them, and exercises mate / flush / angle / insert

@@ -6,8 +6,10 @@ so a new Inventor release can be qualified in a couple of minutes:
     python tests/smoke_test.py            # starts Inventor if not running
     python tests/smoke_test.py --keep     # leave the test documents open
 
-Nothing is saved to disk; the scratch documents are closed without saving
-unless --keep is given. Exit code is the number of failed steps.
+Nothing is saved to disk; the scratch documents it creates are closed without
+saving unless --keep is given. Documents that were already open (your own work,
+and anything they reference) are never touched. Exit code is the number of
+failed steps.
 """
 import sys
 import os
@@ -201,6 +203,18 @@ def sheet_metal_tests(inv, run):
         print("  FAIL  flange: find_edge returned no usable index")
 
 
+def _doc_ids(inv):
+    """InternalName of every open document — includes the invisible ones
+    referenced by open assemblies, so those are protected too."""
+    ids = set()
+    for doc in list(inv.app.Documents):
+        try:
+            ids.add(doc.InternalName)
+        except Exception:
+            pass
+    return ids
+
+
 def main():
     keep = "--keep" in sys.argv
     inv = api.InventorConnection()
@@ -214,6 +228,9 @@ def main():
         print(f"Cannot connect to Inventor: {e}")
         return 1
     print("  version:", inv.app.SoftwareVersion.DisplayVersion)
+    preexisting = _doc_ids(inv)
+    if preexisting:
+        print(f"  {len(preexisting)} document(s) already open — will be left untouched")
     print()
 
     print("Enum constants vs. live type library:")
@@ -225,11 +242,16 @@ def main():
 
     if not keep:
         print("\nClosing scratch documents...")
+        closed = 0
         for doc in list(inv.app.Documents):
             try:
+                if doc.InternalName in preexisting:
+                    continue  # the user's own document, or one it references
                 doc.Close(True)  # SkipSave
+                closed += 1
             except Exception:
                 pass
+        print(f"  closed {closed} scratch document(s)")
 
     print("\n" + "-" * 60)
     print(f"{run.passed} passed, {len(run.failed)} failed")
