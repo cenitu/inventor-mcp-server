@@ -29,7 +29,9 @@ jobs:
           echo "tag=$TAG pyproject=$PY server.json=$SJ server.json package=$SP"
           [ "$TAG" = "$PY" ] && [ "$TAG" = "$SJ" ] && [ "$TAG" = "$SP" ] || { echo "::error::version mismatch"; exit 1; }
       - name: README carries the MCP Registry ownership marker
-        run: grep -q "mcp-name: io.github.cenitu/inventor-mcp-server" README.md
+        # Block scalar: a plain `run:` value may not contain ": " (YAML would read a new key).
+        run: |
+          grep -q "mcp-name: io.github.cenitu/inventor-mcp-server" README.md
       - name: Build
         run: |
           python -m pip install --upgrade build

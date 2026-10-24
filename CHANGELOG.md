@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-24
 
 ### Changed
 - **Package renamed `src` → `inventor_mcp_server`**, so the project can be published to PyPI

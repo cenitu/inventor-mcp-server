@@ -27,6 +27,12 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: python -m pip install "mcp[cli]${{ matrix.mcp }}" pywin32
+      - name: Workflow files are valid YAML
+        # GitHub silently refuses an invalid workflow (it only shows a red run on push),
+        # which for publish.yml would surface only at release time.
+        run: |
+          python -m pip install pyyaml
+          python -c "import glob, yaml; [yaml.safe_load(open(f, encoding='utf-8')) for f in glob.glob('.github/workflows/*.yml')]; print('workflows OK')"
       - name: Byte-compile
         run: python -m compileall -q inventor_mcp_server src tests
       - name: Server checks
