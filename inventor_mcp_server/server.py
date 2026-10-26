@@ -524,25 +524,67 @@ def sheet_metal_face(sketch_index: int = 0) -> str:
 
 
 @mcp.tool()
-def flange(edge_indices: str, distance: float = 25, angle: float = 90) -> str:
+def flange(edge_indices: str, distance: float = 25, angle: float = 90,
+           auto_miter: bool = True, miter_gap: str = "GapSize",
+           height_datum: str = "outer") -> str:
     """Add a Sheet Metal Flange (bent wall) to one or more edges.
 
     Real sheet-metal feature (vs Extrude) — supports Flat Pattern unfolding,
     has proper bend radius, depth ties to Thickness.
+    Put ALL edges of a loop (e.g. the 4 edges of a base panel) in ONE call so the
+    corners are auto-mitered; separate calls leave open corners.
+    The flange bends toward the side of the face the edge belongs to: for an
+    inward flange on a wall, pick the wall's inner-face edge.
 
     Args:
         edge_indices: Comma-separated edge indices (use find_edge to locate).
         distance: Flange height in mm (default 25 = Inventor default).
         angle: Bend angle in degrees (default 90 = perpendicular).
+        auto_miter: Miter the corners between the edges (default True).
+        miter_gap: Corner gap expression; "GapSize" = from the sheet metal rule (default).
+        height_datum: "outer" (from outer intersection, default), "inner", "tangent",
+            "outer_ortho" or "inner_ortho".
     """
     idx_list = [int(i.strip()) for i in edge_indices.split(",")]
-    return inv.flange(idx_list, distance, angle)
+    return inv.flange(idx_list, distance, angle, auto_miter=auto_miter,
+                      miter_gap=miter_gap, height_datum=height_datum)
+
+
+@mcp.tool()
+def cut_on_face(face_index: int, circles: str = "", rectangles: str = "") -> str:
+    """Cut holes through the sheet, placed in WORLD coordinates (mm) on a face.
+    Avoids the face-sketch axis confusion — no need to know the sketch's origin.
+    Verifies material was removed (a cut on a work plane silently removes nothing).
+
+    Args:
+        face_index: Face of the sheet to sketch on (use find_face / list_faces).
+        circles: JSON list of [x, y, z, diameter], e.g. "[[180, 267, 0, 4.9]]".
+        rectangles: JSON list of 4-corner lists, e.g. "[[[-150,-300,40],[150,-300,40],[150,-300,160],[-150,-300,160]]]".
+    """
+    c = json.loads(circles) if circles.strip() else []
+    r = json.loads(rectangles) if rectangles.strip() else []
+    return inv.cut_on_face(face_index, c, r)
+
+
+@mcp.tool()
+def corner_round(edge_indices: str, radius: float = 5) -> str:
+    """Round sharp sheet metal corners (Corner Round — carried into the flat pattern).
+    Use on exposed corners people handle, e.g. mounting plate tabs.
+
+    Args:
+        edge_indices: Comma-separated indices of the short edges through the thickness at the corners.
+        radius: Corner radius in mm.
+    """
+    idx_list = [int(i.strip()) for i in edge_indices.split(",")]
+    return inv.corner_round(idx_list, radius)
 
 
 @mcp.tool()
 def sheet_metal_cut(sketch_index: int = 0) -> str:
     """Cut through the panel — depth = Thickness automatically (parametric!).
-    Sketch should be on the panel face (not a work plane) for correct behavior.
+    Sketch must be on the panel face (not a work plane): a cut that removes no
+    material is deleted and reported as an error. For holes at known world
+    coordinates, cut_on_face is easier.
     One sketch with multiple closed shapes = one Cut feature with multiple holes.
     """
     idx = sketch_index if sketch_index > 0 else None
