@@ -277,6 +277,22 @@ map directly (x→X, y→Y). Set `wp.Visible = False`.
 can flip. Always verify with
 `sketch.SketchToModelSpace(tg.CreatePoint2d(x_cm, y_cm))` → world Point3d.
 
+## Documents and saving
+
+- **`Document.Save()` can block on a modal dialog.** When a referenced file was
+  updated (an assembly whose sub-assembly re-evaluated, a part edited in
+  context), Inventor opens "Do you want to save changes to ... and its
+  dependents?" — even when called through the API — and the call waits until a
+  user clicks OK. Use `doc.Save2(True)` (save dirty dependents too) with
+  `app.SilentOperation = True` around it, and restore the flag afterwards.
+- **`Documents.Add(type, template, True)` does not reliably activate the new
+  document.** `app.ActiveDocument` can keep returning the previous one, so code
+  that works on "the active document" edits the wrong file. Call `doc.Activate()`
+  after creating, and prefer finding documents by `FullFileName` over relying on
+  `ActiveDocument` in scripts.
+- Documents opened as references of an assembly are invisible; `Activate()` on
+  them fails — open them visibly with `app.Documents.Open(path, True)` first.
+
 ## Topology pitfalls
 
 - **Edge/face indices renumber after every feature.** Re-find by midpoint /
