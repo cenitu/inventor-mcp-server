@@ -176,22 +176,48 @@ comp.ActiveSheetMetalStyle.Thickness = "0,8 mm"   # comma decimal on European lo
 
 **Flange** — the big trap:
 ```python
-fdef = flf.CreateFlangeDefinition(edge_collection, angle_RADIANS, distance)
+fdef = flf.CreateFlangeDefinition(edge_collection, angle_RADIANS, distance_cm)
+fdef.SetDistanceHeightExtent(distance_cm, kPositiveExtentDirection, 75521)  # ← the real height
+fdef.ApplyAutoMitering = True
+fdef.MiterGap = "GapSize"          # ← NOT the default, see below
 feat = flf.Add(fdef)
-feat.Definition.HeightExtent.Distance.Expression = "450 mm"   # ← the real height
 doc.Update()
 ```
 - The `distance` argument of `CreateFlangeDefinition` is **silently ignored** —
-  the flange is always created ~25 mm tall. Set the real height afterwards via
-  the `Distance` Parameter's `.Expression`.
+  the flange is created ~25 mm tall. Set the height with `SetDistanceHeightExtent`
+  before `Add` (or afterwards via `feat.Definition.HeightExtent.Distance.Expression`).
 - The angle is in **radians**. Pass `90` and Inventor stores 90·180/π ≈ 5157°.
-- Default `HeightDatumType` 75521 = "From Outer Intersection": the Distance
-  equals the visible outer height (material thickness not subtracted).
+- `HeightDatumType` (`HeightDatumTypeEnum`): 75521 Outer (UI default — the distance
+  equals the height from the outer mold line), 75522 Inner, 75523 Tangent,
+  75524 OuterOrtho, 75525 InnerOrtho. For a flange bent off another flange the
+  "outer intersection" is on the *previous* flange's far face — a 15 mm flange off
+  a 1.5 mm return protrudes 13.5 mm past the visible front.
+- **Miter gap default differs from the UI.** With several edges in one flange,
+  `ApplyAutoMitering` is on by default, but `MiterGap` defaults to the sheet
+  **thickness** (expression `'1,500 mm'`), while the UI dialog uses the rule's
+  `GapSize`. Shop rules often have GapSize ≈ 0.1 mm, so API-built corners come
+  out ~1.5 mm open unless `MiterGap = "GapSize"` is set.
+- **Put all edges of a loop in ONE flange** — the corners are then auto-mitered.
+  Separate flanges leave open corners that need Corner Seam features.
+- **Direction:** the flange bends toward the side of the face the selected edge
+  belongs to. Base panel at Z=0..t: the Z=t edges give walls toward +Z, the Z=0
+  edges toward −Z. For an inward lip on a wall, pick the wall's inner-face edge.
 
 **Cut**: sketch ON the panel face (not a work plane) → `CreateCutDefinition(profile)`
 → `Add`. Depth then defaults to the Thickness parameter, so the cut stays
 correct when thickness changes. One sketch with many closed loops = one Cut
 with many holes. Avoid extrude-cuts for sheet metal — they hardcode the depth.
+- **A cut sketched on a work plane is created without any error but removes
+  nothing** (`+0 mm³`). `sheet_metal_cut` / `cut_on_face` now detect this, delete
+  the empty feature and raise.
+- Face sketches have their own origin and (often flipped) axes. Place geometry by
+  world coordinates with `sketch.ModelToSketchSpace(tg.CreatePoint(x, y, z))`
+  (`TransientGeometry.CreatePoint` is the 3D point — there is no `CreatePoint3d`).
+  Wrapped as `cut_on_face`.
+
+**Corner Round** (rounded corners that are also in the flat pattern, so the laser
+cuts them): `crf.Add(crf.CreateCornerRoundDefinition(edge_collection, "5 mm"))`,
+with the short edges running through the thickness at the corners.
 
 **Flat Pattern** is the acid test: if it unfolds, your geometry is real sheet
 metal; extrude-built "walls" look identical but won't unfold.

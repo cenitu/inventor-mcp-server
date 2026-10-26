@@ -1197,35 +1197,49 @@ class InventorConnection:
         feat = ff.Add(fdef)
         return f"Sheet metal face: {feat.Name}{self._fmt_delta(before)}"
 
+    # HeightDatumTypeEnum — how the flange height is measured
+    _HEIGHT_DATUM = {"outer": 75521, "inner": 75522, "tangent": 75523,
+                     "outer_ortho": 75524, "inner_ortho": 75525}
+
     def flange(
         self,
         edge_indices: list[int],
         distance: float = 25,
         angle: float = 90,
         body_index: int = 1,
+        auto_miter: bool = True,
+        miter_gap: str = "GapSize",
+        height_datum: str = "outer",
     ) -> str:
-        """Add a Sheet Metal Flange to one or more edges. Inventor 2026.
+        """Add a Sheet Metal Flange to one or more edges.
 
         distance: flange height in mm (default 25mm = Inventor's own default)
         angle: bend angle in degrees, default 90° (perpendicular)
-        edge_indices: 1-based indices into the body's Edges collection
+        edge_indices: 1-based indices into the body's Edges collection. Give all
+            edges of a loop in ONE call so Inventor auto-miters the corners —
+            separate flanges need corner seams to close the gaps.
+        auto_miter: miter the corners between the edges (UI: Auto-Mitering).
+        miter_gap: gap expression; "GapSize" takes it from the sheet metal rule.
+        height_datum: "outer" (from outer intersection, UI default), "inner",
+            "tangent", "outer_ortho", "inner_ortho".
 
-        IMPORTANT (Inventor 2026 sheet metal quirk):
-          - CreateFlangeDefinition(Edges, AngleRad, Distance) ignores the Distance arg.
-          - The resulting flange always defaults to height 25mm regardless of what you pass.
-          - We work around by editing the resulting feature's parameter:
-              feat.Definition.HeightExtent.Distance.Expression = "<distance> mm"
-          - The Distance is a Parameter (d15-ish name) — changing its Expression
-            re-evaluates the feature correctly.
-          - Angle must be in RADIANS (Inventor multiplies by 180/π for display).
-            Passing 90 → 5156°. Always convert via math.radians().
-
-        Measurement default = "From Outer Intersection" (HeightDatumType=75521).
-        With this datum the Distance value EQUALS the visible perpendicular height
-        of the flange — material thickness is NOT subtracted. So distance=450 gives
-        a body that reaches Z=450 (when the flange goes upward from a Z=0 dno).
+        Quirks (Inventor 2026/2027):
+          - The Distance argument of CreateFlangeDefinition is ignored; the
+            height must be set with SetDistanceHeightExtent before Add.
+          - The API default MiterGap is the sheet THICKNESS, not the rule's
+            GapSize that the UI uses — corners come out visibly open unless
+            MiterGap is set explicitly.
+          - Angle must be in RADIANS. Passing 90 → 5156°.
+          - The flange grows from the face the selected edge belongs to: pick the
+            edge on the side the flange should bend toward (e.g. the inner-face
+            edge of a wall for an inward flange).
+        With "outer" the distance equals the height from the outer mold line, so
+        distance=200 on a base panel at Z=0..t gives walls reaching Z=200.
         """
         import math
+        datum = self._HEIGHT_DATUM.get(height_datum.lower())
+        if datum is None:
+            raise ValueError(f"height_datum must be one of {', '.join(self._HEIGHT_DATUM)}")
         comp = self.active_part()
         body = comp.SurfaceBodies.Item(body_index)
         ec = self.app.TransientObjects.CreateEdgeCollection()
@@ -1233,16 +1247,24 @@ class InventorConnection:
             ec.Add(body.Edges.Item(idx))
 
         flf = comp.Features.FlangeFeatures
-        angle_rad = math.radians(angle)
         before = self._vol_state()
-        # Distance arg is ignored by Inventor — we set it explicitly after Add
-        fdef = flf.CreateFlangeDefinition(ec, angle_rad, 2.5)
+        fdef = flf.CreateFlangeDefinition(ec, math.radians(angle), distance / 10.0)
+        fdef.SetDistanceHeightExtent(distance / 10.0, kPositiveExtentDirection, datum)
+        fdef.ApplyAutoMitering = auto_miter
+        if auto_miter and miter_gap:
+            fdef.MiterGap = miter_gap
         feat = flf.Add(fdef)
-        # Set actual distance via the Parameter
-        feat.Definition.HeightExtent.Distance.Expression = f"{distance} mm"
         # Update so subsequent feature/edge operations see correct geometry
         self.active_document().Update()
-        return f"Flange {distance}mm @ {angle}° on {ec.Count} edge(s): {feat.Name}{self._fmt_delta(before)}"
+        gap = ""
+        if auto_miter:
+            try:
+                g = feat.Definition.MiterGap
+                gap = f", miter gap {g.Expression} = {g.Value * 10:.2f} mm"
+            except Exception:
+                pass
+        return (f"Flange {distance}mm @ {angle}° on {ec.Count} edge(s){gap}: "
+                f"{feat.Name}{self._fmt_delta(before)}")
 
     def sheet_metal_cut(
         self,
@@ -1262,7 +1284,83 @@ class InventorConnection:
         cdef = cf.CreateCutDefinition(profile)
         # Default extent = through thickness (kThroughAllExtent style)
         feat = cf.Add(cdef)
+        self._require_removed(feat, before, "Sheet metal cut")
         return f"Sheet metal cut: {feat.Name}{self._fmt_delta(before)}"
+
+    def _require_removed(self, feat, before, label):
+        """A sheet metal Cut sketched on a work plane (not on a face of the sheet)
+        is created without error but removes nothing. Delete it and raise."""
+        after = self._vol_state()
+        if before and after and before[0] - after[0] < 1e-3:
+            name = feat.Name
+            feat.Delete(False, False, False)
+            raise RuntimeError(
+                f"{label} '{name}' removed no material and was deleted — the sketch must "
+                "lie on a face of the sheet (create_sketch(face_index=...) or cut_on_face), "
+                "not on a work plane, and the profile must overlap the sheet.")
+
+    def cut_on_face(
+        self,
+        face_index: int,
+        circles: list | None = None,
+        rectangles: list | None = None,
+        body_index: int = 1,
+    ) -> str:
+        """Cut holes through the sheet at WORLD coordinates (mm), sketched on a face.
+
+        Face sketches have their own origin and axes (often flipped), so placing
+        geometry with sketch coordinates is error-prone. Here every point is given
+        in model space and mapped with PlanarSketch.ModelToSketchSpace.
+
+        circles:    [[x, y, z, diameter], ...]
+        rectangles: [[[x, y, z], [x, y, z], [x, y, z], [x, y, z]], ...] — 4 corners in order
+        The removed volume is verified; a cut that removes nothing raises.
+        """
+        comp = self.active_part()
+        body = comp.SurfaceBodies.Item(body_index)
+        face = body.Faces.Item(face_index)
+        sketch = comp.Sketches.Add(face)
+        tg = self._tg()
+
+        def p2(x, y, z):
+            return sketch.ModelToSketchSpace(tg.CreatePoint(x / 10.0, y / 10.0, z / 10.0))
+
+        n = 0
+        for x, y, z, d in circles or []:
+            sketch.SketchCircles.AddByCenterRadius(p2(x, y, z), d / 20.0)
+            n += 1
+        for corners in rectangles or []:
+            pts = [p2(*c) for c in corners]
+            first = sketch.SketchLines.AddByTwoPoints(pts[0], pts[1])
+            last = first
+            for pt in pts[2:]:
+                last = sketch.SketchLines.AddByTwoPoints(last.EndSketchPoint, pt)
+            sketch.SketchLines.AddByTwoPoints(last.EndSketchPoint, first.StartSketchPoint)
+            n += 1
+        if n == 0:
+            sketch.Delete()
+            raise ValueError("Give at least one circle or rectangle.")
+        cf = comp.Features.CutFeatures
+        before = self._vol_state()
+        feat = cf.Add(cf.CreateCutDefinition(sketch.Profiles.AddForSolid()))
+        self.active_document().Update()
+        self._require_removed(feat, before, "cut_on_face")
+        return f"Cut {n} shape(s) on face {face_index}: {feat.Name}{self._fmt_delta(before)}"
+
+    def corner_round(self, edge_indices: list[int], radius: float = 5, body_index: int = 1) -> str:
+        """Round sheet metal corners (Corner Round feature — also rounds the flat
+        pattern, so the laser cuts it). Edges are the short edges running through
+        the thickness at the corners; locate them with find_edge / list_edges."""
+        comp = self.active_part()
+        body = comp.SurfaceBodies.Item(body_index)
+        ec = self.app.TransientObjects.CreateEdgeCollection()
+        for idx in edge_indices:
+            ec.Add(body.Edges.Item(idx))
+        before = self._vol_state()
+        crf = comp.Features.CornerRoundFeatures
+        feat = crf.Add(crf.CreateCornerRoundDefinition(ec, f"{radius} mm"))
+        self.active_document().Update()
+        return f"Corner round R{radius} on {ec.Count} corner(s): {feat.Name}{self._fmt_delta(before)}"
 
     def find_edge(
         self,

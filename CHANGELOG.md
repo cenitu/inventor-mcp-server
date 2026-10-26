@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`cut_on_face`** — holes and rectangular cut-outs placed by WORLD coordinates on a sheet metal
+  face (mapped with `ModelToSketchSpace`), so the face sketch's own origin and flipped axes don't
+  matter. Verifies material was removed.
+- **`corner_round`** — Corner Round on sheet metal corners (also in the flat pattern).
+- **`flange`**: `auto_miter`, `miter_gap` (default `GapSize` from the rule) and `height_datum`
+  options; the height is now set with `SetDistanceHeightExtent`.
+
+### Fixed
+- **Flange corners came out open.** The API's default miter gap is the sheet thickness, not the
+  rule's `GapSize` the UI uses; `flange` now sets `GapSize` explicitly.
+- **`sheet_metal_cut` silently removed nothing** when the sketch was on a work plane. It now deletes
+  the empty feature and raises with a hint (#6).
+
 ## 0.3.0 — 2026-10-24
 
 ### Changed

@@ -203,6 +203,81 @@ def sheet_metal_tests(inv, run):
         print("  FAIL  flange: find_edge returned no usable index")
 
 
+def sheet_metal_box_tests(inv, run):
+    """A small enclosure body: 4 flanges in ONE call (auto-miter), an inward
+    front flange, holes at world coordinates, a work-plane cut that must fail,
+    and corner rounds on a flat plate."""
+    T = 1.5
+    run.step("create_part(sheet_metal) box", lambda: inv.create_part("smoke_box", "sheet_metal"))
+    run.step("set_sheet_metal_thickness 1.5", lambda: inv.set_sheet_metal_thickness(T))
+    run.step("create_sketch(XY) box", lambda: inv.create_sketch("XY"))
+    run.step("draw_rectangle 100x60", lambda: inv.draw_rectangle(0, 0, 100, 60))
+    run.step("sheet_metal_face box", lambda: inv.sheet_metal_face())
+    walls = [inv.find_edge(x=50, y=0, z=T), inv.find_edge(x=-50, y=0, z=T),
+             inv.find_edge(x=0, y=30, z=T), inv.find_edge(x=0, y=-30, z=T)]
+    run.step("flange 4 edges in one call (auto-miter)", lambda: inv.flange(walls, 40))
+
+    def miter_gap_is_rule_gap():
+        comp = inv.active_part()
+        fl = [f for f in comp.Features if f.Name.startswith("Flange")][-1]
+        mg = fl.Definition.MiterGap
+        # Check the expression, not just the value: in the stock Default_mm rule
+        # GapSize equals the thickness, which is also the API's (wrong) default.
+        if "gapsize" not in mg.Expression.replace(" ", "").lower():
+            _raise(f"miter gap expression is {mg.Expression!r}, expected 'GapSize'")
+        return f"miter gap = {mg.Expression} = {mg.Value*10:.2f} mm"
+    run.step("miter gap taken from the rule (not thickness)", miter_gap_is_rule_gap)
+
+    def walls_reach_40():
+        rb = inv.active_part().SurfaceBodies.Item(1).RangeBox
+        if abs(rb.MaxPoint.Z * 10 - 40) > 0.05 or abs(rb.MaxPoint.X * 10 - 50) > 0.05:
+            _raise(f"bbox X {rb.MaxPoint.X*10:.2f} Z {rb.MaxPoint.Z*10:.2f}, expected 50 / 40")
+        return "outer 100 x 60 x 40"
+    run.step("box outer size from outer intersection", walls_reach_40)
+
+    inner = [inv.find_edge(x=50 - T, y=0, z=40), inv.find_edge(x=-(50 - T), y=0, z=40),
+             inv.find_edge(x=0, y=30 - T, z=40), inv.find_edge(x=0, y=-(30 - T), z=40)]
+    run.step("inward front flange 8mm (inner-face edges)", lambda: inv.flange(inner, 8))
+
+    def front_flange_is_inward():
+        rb = inv.active_part().SurfaceBodies.Item(1).RangeBox
+        if rb.MaxPoint.X * 10 > 50.05:
+            _raise(f"flange went outward: X max {rb.MaxPoint.X*10:.2f}")
+        return "outer size unchanged"
+    run.step("front flange bent inward", front_flange_is_inward)
+
+    side = inv.find_face(x=-50, min_area=500, tolerance=0.1)
+    run.step("cut_on_face: 2 holes at world coordinates",
+             lambda: inv.cut_on_face(side, circles=[[-50, -10, 20, 5.5], [-50, 10, 20, 5.5]]))
+    run.step("create_sketch on work plane (XY offset 20)", lambda: inv.create_sketch("XY", offset=20))
+    run.step("draw_circle on work plane", lambda: inv.draw_circle(0, 0, 10))
+    n_feat = inv.active_part().Features.Count
+    run.step("sheet_metal_cut on work plane raises",
+             lambda: _expect_error(lambda: inv.sheet_metal_cut(), "removed no material"))
+    run.step("failed cut left no feature behind",
+             lambda: "ok" if inv.active_part().Features.Count == n_feat
+             else _raise("an empty Cut feature was left in the tree"))
+
+    run.step("create_part(sheet_metal) plate", lambda: inv.create_part("smoke_plate", "sheet_metal"))
+    run.step("set_sheet_metal_thickness 2", lambda: inv.set_sheet_metal_thickness(2))
+    run.step("create_sketch(XY) plate", lambda: inv.create_sketch("XY"))
+    run.step("draw_rectangle 80x50", lambda: inv.draw_rectangle(0, 0, 80, 50))
+    run.step("sheet_metal_face plate", lambda: inv.sheet_metal_face())
+
+    def corners():
+        b = inv.active_part().SurfaceBodies.Item(1)
+        out = []
+        for i in range(1, b.Edges.Count + 1):
+            e = b.Edges.Item(i)
+            p, q = e.StartVertex.Point, e.StopVertex.Point
+            if abs(abs(p.Z - q.Z) * 10 - 2) < 1e-3 and abs(p.X - q.X) < 1e-6 and abs(p.Y - q.Y) < 1e-6:
+                out.append(i)
+        return out
+    run.step("corner_round R5 on 4 corners", lambda: inv.corner_round(corners(), 5))
+    run.step("flat pattern still unfolds", lambda: (inv.active_part().Unfold(),
+                                                    inv.active_part().FlatPattern.ExitEdit(), "ok")[2])
+
+
 def _doc_ids(inv):
     """InternalName of every open document — includes the invisible ones
     referenced by open assemblies, so those are protected too."""
@@ -239,6 +314,8 @@ def main():
     part_tests(inv, run)
     print("\nSheet metal:")
     sheet_metal_tests(inv, run)
+    print("\nSheet metal box (auto-miter, cut_on_face, corner_round):")
+    sheet_metal_box_tests(inv, run)
 
     if not keep:
         print("\nClosing scratch documents...")
