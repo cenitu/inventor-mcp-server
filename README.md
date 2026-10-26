@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/cenitu/inventor-mcp-server/main/assets/logo.png" alt="inventor-mcp-server logo" width="128">
+</p>
+
 # inventor-mcp-server
 
 <!-- mcp-name: io.github.cenitu/inventor-mcp-server -->

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400" role="img">
+  <title>inventor-mcp-server</title>
+  <rect width="400" height="400" rx="80" fill="#13213a"/>
+  <path d="M120 105 L135 120 L135 150 L95 150 L95 330 L305 330 L305 150 L265 150 L265 120 L280 105"
+        fill="none" stroke="#f07d1f" stroke-width="22" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="140" y="288" width="120" height="16" rx="3" fill="#c9d2de"/>
+  <line x1="200" y1="78" x2="200" y2="205" stroke="#c9d2de" stroke-width="8" stroke-linecap="round"/>
+  <line x1="200" y1="215" x2="160" y2="252" stroke="#c9d2de" stroke-width="7" stroke-linecap="round"/>
+  <line x1="200" y1="215" x2="240" y2="252" stroke="#c9d2de" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="200" cy="58" r="20" fill="#f07d1f"/>
+  <circle cx="200" cy="215" r="14" fill="#c9d2de"/>
+  <circle cx="160" cy="255" r="11" fill="#c9d2de"/>
+  <circle cx="240" cy="255" r="11" fill="#c9d2de"/>
+</svg>
