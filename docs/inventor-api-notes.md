@@ -285,7 +285,7 @@ can flip. Always verify with
   SAT `{89162634-02B6-11D5-8E80-0010B541CD80}`, STL export `{533E9A98-FC3B-11D4-8E7E-0010B541CD80}`.
   `app.ApplicationAddIns.ItemById(clsid).SaveCopyAs(doc, context, options, medium)`.
 - **Opening a STEP assembly writes its parts next to the .step file**, into a new
-  folder named after it (`DownloadsŲ.1.47.ipt ... 7.ipt`). If the STEP sits in
+  folder named after it (`Downloads/562.1.47/1.ipt ... 7.ipt`). If the STEP sits in
   a synced or shared folder, copy it into the project folder first and open the copy.
   Vendor models are drawn without your sheet thickness: screws, nuts and gaskets often
   overlap the panel — move them to their real seat before judging interference.
