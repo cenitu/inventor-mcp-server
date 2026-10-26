@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- **`import_step`** — import a vendor STEP (hinge, lock, gland) into the project folder. The STEP is
+  copied there first, because Inventor writes the parts of an imported assembly next to the .step
+  file (e.g. into a synced Downloads/OneDrive folder). Returns per-component bounding boxes and volumes.
+- **`place_component(x_axis, y_axis)`** — full orientation, so vendor models can be placed exactly.
+- **`check_interference`**, **`measure_distance`** — overlap volume/bbox and minimum distance between
+  occurrences (`Asm:1/2` addresses a part inside a sub-assembly).
+- **`sweep_rotation`** — rotate occurrences about an axis in steps and report collisions per angle
+  (door on its hinge axis, lock tongue on its shaft); positions are restored.
 - **`cut_on_face`** — holes and rectangular cut-outs placed by WORLD coordinates on a sheet metal
   face (mapped with `ModelToSketchSpace`), so the face sketch's own origin and flipped axes don't
   matter. Verifies material was removed.
@@ -12,6 +20,10 @@
   options; the height is now set with `SetDistanceHeightExtent`.
 
 ### Fixed
+- **`export_document` never worked on Inventor 2027** (and failed for STEP, IGES, SAT and STL alike):
+  it searched translator add-ins by display name ("Autodesk Inventor STEP Translator"), which is
+  "Translator: STEP" in 2027. Translators are now found by their fixed class IDs; the misleading
+  fallback that saved a native file under the export extension is gone, and the written file is verified.
 - **Saving no longer opens a blocking dialog.** `save_document` used `Document.Save()`, which opens
   Inventor's modal "save changes to dependents?" prompt whenever a referenced file changed — the
   call then waits until a user clicks OK. It now uses `Save2(True)` under `SilentOperation`.

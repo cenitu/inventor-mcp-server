@@ -228,41 +228,36 @@ class InventorConnection:
         doc = self.active_document()
         path = os.path.abspath(path)
 
+        # Translator add-ins by their fixed class IDs. The display names change
+        # between releases ("Autodesk Inventor STEP Translator" vs 2027's
+        # "Translator: STEP"), so matching names silently found nothing.
+        translators = {
+            "STEP": "{90AF7F40-0C01-11D5-8E83-0010B541CD80}",
+            "IGES": "{90AF7F44-0C01-11D5-8E83-0010B541CD80}",
+            "SAT":  "{89162634-02B6-11D5-8E80-0010B541CD80}",
+            "STL":  "{533E9A98-FC3B-11D4-8E7E-0010B541CD80}",   # STL *export*
+        }
         format_upper = format.upper()
-        if format_upper == "STEP":
-            translator = "Autodesk Inventor STEP Translator"
-        elif format_upper == "STL":
-            translator = "Autodesk Inventor STL Translator"
-        elif format_upper == "SAT":
-            translator = "Autodesk Inventor SAT Translator"
-        elif format_upper == "IGES":
-            translator = "Autodesk Inventor IGES Translator"
-        else:
+        if format_upper not in translators:
             raise ValueError(f"Unsupported format: {format}. Use STEP, STL, SAT, or IGES.")
+        try:
+            addin = self.app.ApplicationAddIns.ItemById(translators[format_upper])
+        except Exception:
+            raise RuntimeError(f"{format_upper} translator add-in is not installed")
+        if not addin.Activated:
+            addin.Activate()
 
         context = self.app.TransientObjects.CreateTranslationContext()
         context.Type = 13059  # kFileBrowseIOMechanism
         options = self.app.TransientObjects.CreateNameValueMap()
         data_medium = self.app.TransientObjects.CreateDataMedium()
         data_medium.FileName = path
-
-        addins = self.app.ApplicationAddIns
-        found = None
-        for i in range(1, addins.Count + 1):
-            addin = addins.Item(i)
-            if hasattr(addin, "DisplayName") and translator.lower() in addin.DisplayName.lower():
-                found = addin
-                break
-
-        if found is None:
-            raise RuntimeError(f"Translator not found: {translator}")
-
-        if hasattr(found, "SaveCopyAs"):
-            found.SaveCopyAs(doc, context, options, data_medium)
-        else:
-            doc.SaveAs(path, False)
-
-        return f"Exported to: {path} ({format_upper})"
+        if os.path.exists(path):
+            os.remove(path)
+        self._silently(lambda: addin.SaveCopyAs(doc, context, options, data_medium))
+        if not os.path.exists(path):
+            raise RuntimeError(f"{format_upper} export reported success but wrote no file: {path}")
+        return f"Exported to: {path} ({format_upper}, {os.path.getsize(path) // 1024} KB)"
 
     # ---------- Sketches ----------
 
@@ -1545,8 +1540,15 @@ class InventorConnection:
         path: str,
         x: float = 0, y: float = 0, z: float = 0,
         grounded: bool = False,
+        x_axis: tuple | None = None,
+        y_axis: tuple | None = None,
     ) -> str:
         """Place a part or sub-assembly into the active assembly at (x,y,z) mm.
+
+        x_axis / y_axis: where the component's own X and Y axes point in the
+        assembly, e.g. x_axis=(0,0,1), y_axis=(0,1,0). Z follows (X × Y).
+        Omit both for no rotation. Lets vendor STEP models (whose axes rarely
+        match yours) be placed exactly without constraints.
 
         The file must exist on disk — save parts before placing them.
         Returns the occurrence index (1-based) for use in constraints.
@@ -1558,7 +1560,16 @@ class InventorConnection:
 
         tg = self._tg()
         matrix = tg.CreateMatrix()
-        if x or y or z:
+        if x_axis is not None or y_axis is not None:
+            if x_axis is None or y_axis is None:
+                raise ValueError("Give both x_axis and y_axis (or neither).")
+            ax, ay = [float(v) for v in x_axis], [float(v) for v in y_axis]
+            if abs(sum(a * b for a, b in zip(ax, ay))) > 1e-6:
+                raise ValueError(f"x_axis {ax} and y_axis {ay} must be perpendicular.")
+            az = (ax[1]*ay[2] - ax[2]*ay[1], ax[2]*ay[0] - ax[0]*ay[2], ax[0]*ay[1] - ax[1]*ay[0])
+            matrix.SetCoordinateSystem(tg.CreatePoint(x / 10.0, y / 10.0, z / 10.0),
+                                       tg.CreateVector(*ax), tg.CreateVector(*ay), tg.CreateVector(*az))
+        elif x or y or z:
             matrix.SetTranslation(tg.CreateVector(x / 10.0, y / 10.0, z / 10.0))
         occ = comp.Occurrences.Add(path, matrix)
         if grounded:
@@ -1568,6 +1579,150 @@ class InventorConnection:
         state = ", grounded" if grounded else ""
         return (f"Placed '{occ.Name}' at ({x},{y},{z})mm{state} "
                 f"[occurrence {idx} of {comp.Occurrences.Count}]")
+
+    # ---------- Vendor parts, clearance checks, motion ----------
+
+    def import_step(self, step_path: str, dest_folder: str, name: str | None = None) -> dict:
+        """Import a vendor STEP file as Inventor files inside dest_folder.
+
+        Inventor writes the parts of an imported STEP assembly into a folder NEXT
+        TO THE .step FILE (e.g. Downloads\\x\\1.ipt ... 7.ipt) — which may be a
+        synced or shared folder. So the STEP is first copied into dest_folder and
+        imported from there; nothing is written beside the original.
+        Returns a summary (path, type, size, components with bbox/volume).
+        """
+        import shutil
+        step_path = os.path.abspath(step_path)
+        dest_folder = os.path.abspath(dest_folder)
+        if not os.path.exists(step_path):
+            raise RuntimeError(f"STEP file not found: {step_path}")
+        os.makedirs(dest_folder, exist_ok=True)
+        local = os.path.join(dest_folder, os.path.basename(step_path))
+        if os.path.normcase(local) != os.path.normcase(step_path):
+            shutil.copy2(step_path, local)
+        doc = self.app.Documents.Open(local, True)
+        doc.Activate()
+        base = name or os.path.splitext(os.path.basename(step_path))[0]
+        is_asm = doc.DocumentType == kAssemblyDocumentObject
+        target = os.path.join(dest_folder, base + (".iam" if is_asm else ".ipt"))
+        stray = []
+        for ref in list(doc.AllReferencedDocuments):
+            if not os.path.normcase(ref.FullFileName or "").startswith(os.path.normcase(dest_folder)):
+                stray.append(ref.FullFileName)
+        if stray:
+            raise RuntimeError(f"Import wrote files outside {dest_folder}: {stray}")
+        self._silently(lambda: doc.SaveAs(target, False))
+        cd = doc.ComponentDefinition
+
+        def bb(r):
+            return [round(v * 10, 2) for v in (r.MinPoint.X, r.MaxPoint.X, r.MinPoint.Y,
+                                                r.MaxPoint.Y, r.MinPoint.Z, r.MaxPoint.Z)]
+        out = {"path": target, "type": "assembly" if is_asm else "part", "bbox_mm": bb(cd.RangeBox)}
+        if is_asm:
+            comps = []
+            for o in cd.Occurrences:
+                try:
+                    vol = round(o.MassProperties.Volume * 1000)
+                except Exception:
+                    vol = None
+                comps.append({"name": o.Name, "bbox_mm": bb(o.RangeBox), "volume_mm3": vol})
+            out["components"] = comps
+        return out
+
+    def _occ(self, name: str):
+        """Occurrence by name in the active assembly; 'Sub:1/2' reaches a
+        sub-occurrence (e.g. one part of a vendor hinge assembly)."""
+        comp = self.active_assembly()
+        parts = name.split("/")
+        coll = comp.Occurrences
+        occ = None
+        for part in parts:
+            matches = [o for o in (coll if occ is None else occ.SubOccurrences) if o.Name == part]
+            if not matches:
+                have = ", ".join(o.Name for o in (coll if occ is None else occ.SubOccurrences))
+                raise ValueError(f"No occurrence '{part}'. Available: {have}")
+            occ = matches[0]
+        return occ
+
+    def check_interference(self, set_a: list[str], set_b: list[str] | None = None) -> list[dict]:
+        """Interference between two sets of occurrences (names; 'Asm:1/2' for a
+        sub-part). set_b empty = everything else. Returns overlap volume and
+        bounding box per pair — touching faces are not interference."""
+        comp = self.active_assembly()
+        a = [self._occ(n) for n in set_a]
+        a_names = {o.Name for o in a}
+        b = [self._occ(n) for n in set_b] if set_b else [o for o in comp.Occurrences if o.Name not in a_names]
+        ca = self.app.TransientObjects.CreateObjectCollection()
+        for o in a:
+            ca.Add(o)
+        cb = self.app.TransientObjects.CreateObjectCollection()
+        for o in b:
+            cb.Add(o)
+        res = comp.AnalyzeInterference(ca, cb)
+        out = []
+        for i in range(1, res.Count + 1):
+            r = res.Item(i)
+            rb = r.InterferenceBody.RangeBox
+            out.append({"a": r.OccurrenceOne.Name, "b": r.OccurrenceTwo.Name,
+                        "volume_mm3": round(r.Volume * 1000, 3),
+                        "bbox_mm": [round(v * 10, 2) for v in (rb.MinPoint.X, rb.MaxPoint.X, rb.MinPoint.Y,
+                                                                rb.MaxPoint.Y, rb.MinPoint.Z, rb.MaxPoint.Z)]})
+        return out
+
+    def measure_distance(self, a: str, b: str) -> float:
+        """Minimum distance in mm between two occurrences (0 = touching or overlapping)."""
+        self.active_assembly()
+        return round(self.app.MeasureTools.GetMinimumDistance(self._occ(a), self._occ(b))[0] * 10, 3)
+
+    def sweep_rotation(
+        self,
+        moving: list[str],
+        axis_point: tuple, axis_dir: tuple,
+        start: float = 0, stop: float = 110, step: float = 10,
+        against: list[str] | None = None,
+        measure_to: str | None = None,
+    ) -> list[dict]:
+        """Rotate occurrences about an axis in steps and check for collisions —
+        e.g. a door on its hinge axis, or a lock tongue on its shaft.
+
+        moving: occurrences that rotate together (door, lock, door-mounted studs).
+        axis_point (mm) / axis_dir: the rotation axis. Angles in degrees.
+        against: occurrences to test (default: everything else).
+        measure_to: optional occurrence to report the minimum distance to.
+        The original positions are always restored.
+        """
+        import math
+        comp = self.active_assembly()
+        tg = self._tg()
+        movers = [self._occ(n) for n in moving]
+        base = [o.Transformation for o in movers]
+        pt = tg.CreatePoint(*(v / 10.0 for v in axis_point))
+        vec = tg.CreateVector(*axis_dir)
+        target = self._occ(measure_to) if measure_to else None
+        rows = []
+        try:
+            ang = start
+            while ang <= stop + 1e-9:
+                rot = tg.CreateMatrix()
+                rot.SetToRotation(math.radians(ang), vec, pt)
+                for o, m0 in zip(movers, base):
+                    m = m0.Copy()
+                    m.TransformBy(rot)
+                    o.Transformation = m
+                hits = self.check_interference(moving, against)
+                row = {"angle": round(ang, 3), "collisions": len(hits),
+                       "volume_mm3": round(sum(h["volume_mm3"] for h in hits), 3),
+                       "with": sorted({h["b"] for h in hits})}
+                if target is not None:
+                    row["min_distance_mm"] = round(min(
+                        self.app.MeasureTools.GetMinimumDistance(o, target)[0] for o in movers) * 10, 2)
+                rows.append(row)
+                ang += step
+        finally:
+            for o, m0 in zip(movers, base):
+                o.Transformation = m0
+            self.active_document().Update()
+        return rows
 
     def list_occurrences(self) -> str:
         """Compact table of the assembly's components:

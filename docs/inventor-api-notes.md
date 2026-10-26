@@ -277,6 +277,29 @@ map directly (x→X, y→Y). Set `wp.Visible = False`.
 can flip. Always verify with
 `sketch.SketchToModelSpace(tg.CreatePoint2d(x_cm, y_cm))` → world Point3d.
 
+## Import / export
+
+- **Find translator add-ins by class ID, not display name.** The names change
+  between releases (2027: `"Translator: STEP"`), the IDs don't:
+  STEP `{90AF7F40-0C01-11D5-8E83-0010B541CD80}`, IGES `{90AF7F44-0C01-11D5-8E83-0010B541CD80}`,
+  SAT `{89162634-02B6-11D5-8E80-0010B541CD80}`, STL export `{533E9A98-FC3B-11D4-8E7E-0010B541CD80}`.
+  `app.ApplicationAddIns.ItemById(clsid).SaveCopyAs(doc, context, options, medium)`.
+- **Opening a STEP assembly writes its parts next to the .step file**, into a new
+  folder named after it (`Downloads/562.1.47/1.ipt ... 7.ipt`). If the STEP sits in
+  a synced or shared folder, copy it into the project folder first and open the copy.
+  Vendor models are drawn without your sheet thickness: screws, nuts and gaskets often
+  overlap the panel — move them to their real seat before judging interference.
+
+## Clearance checks
+
+- `asmDef.AnalyzeInterference(collA, collB)` → results with `Volume` (cm³),
+  `OccurrenceOne/Two` and `InterferenceBody` (for the overlap's RangeBox). Touching
+  faces are not interference; designed overlaps (gasket compression) are.
+- `app.MeasureTools.GetMinimumDistance(a, b)` returns a **tuple** `(distance_cm, context)`.
+- A rotation sweep is just `Matrix.SetToRotation(angle, axis, point)` applied to each
+  moving occurrence's original `Transformation`, one interference check per step —
+  restore the transformations afterwards.
+
 ## Documents and saving
 
 - **`Document.Save()` can block on a modal dialog.** When a referenced file was

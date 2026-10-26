@@ -244,6 +244,83 @@ def document_tests(inv, run):
              else _raise("a dependent is still unsaved"))
 
 
+def assembly_tool_tests(inv, run):
+    """import_step (nothing written beside the original), oriented placement,
+    interference / distance, and a rotation sweep that must hit an obstacle."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="inventor_mcp_smoke_")
+    _TEMP_DIRS.append(tmp)
+    src, imp = os.path.join(tmp, "download"), os.path.join(tmp, "project")
+    os.makedirs(src)
+    blk, bar = os.path.join(tmp, "blk.ipt"), os.path.join(tmp, "bar.ipt")
+
+    run.step("cube 20 (z 0..20)", lambda: (inv.create_part("blk"), inv.create_sketch("XY"),
+                                           inv.draw_rectangle(0, 0, 20, 20), inv.extrude(20),
+                                           inv.save_document(blk))[-1])
+    run.step("export cube as STEP", lambda: inv.export_document(os.path.join(src, "blk.step"), "STEP"))
+    for fmt, ext in (("IGES", "igs"), ("SAT", "sat"), ("STL", "stl")):
+        run.step(f"export cube as {fmt}", lambda fmt=fmt, ext=ext: inv.export_document(os.path.join(tmp, f"blk.{ext}"), fmt))
+
+    def bar_part():
+        inv.create_part("bar"); inv.create_sketch("XY")
+        inv.draw_closed_profile([[0, -5], [40, -5], [40, 5], [0, 5]])
+        inv.extrude(10)
+        return inv.save_document(bar)
+    run.step("bar 40x10x10 along +X from origin", bar_part)
+    run.step("assembly of 2 cubes → STEP", lambda: (inv.create_assembly("stepasm"),
+                                                    inv.place_component(blk, 0, 0, 0, grounded=True),
+                                                    inv.place_component(blk, 30, 0, 0, grounded=True),
+                                                    inv.save_document(os.path.join(tmp, "stepasm.iam")),
+                                                    inv.export_document(os.path.join(src, "asm.step"), "STEP"))[-1])
+    before = set(os.listdir(src))
+    run.step("import_step part", lambda: inv.import_step(os.path.join(src, "blk.step"), imp)["type"])
+    res = run.step("import_step assembly", lambda: inv.import_step(os.path.join(src, "asm.step"), imp))
+    run.step("imported assembly has 2 components",
+             lambda: "ok" if res and len(res.get("components", [])) == 2 else _raise(str(res)))
+    run.step("nothing written beside the original STEP files",
+             lambda: "ok" if set(os.listdir(src)) == before
+             else _raise(f"new files in download folder: {set(os.listdir(src)) - before}"))
+
+    run.step("create_assembly clearance", lambda: inv.create_assembly("clr"))
+    run.step("place cube A (grounded)", lambda: inv.place_component(blk, 0, 0, 0, grounded=True))
+    run.step("place cube B overlapping by 10", lambda: inv.place_component(blk, 10, 0, 0, grounded=True))
+    run.step("place cube C 20 mm away", lambda: inv.place_component(blk, 40, 0, 0, grounded=True))
+
+    def overlap_4000():
+        hits = inv.check_interference(["blk:1"], ["blk:2"])
+        v = hits[0]["volume_mm3"] if hits else 0
+        return f"{v} mm3" if abs(v - 4000) < 0.5 else _raise(f"overlap {v} mm3, expected 4000")
+    run.step("check_interference A↔B = 10x20x20", overlap_4000)
+    run.step("check_interference A↔C none",
+             lambda: "ok" if not inv.check_interference(["blk:1"], ["blk:3"]) else _raise("unexpected overlap"))
+    run.step("measure_distance A↔C = 20",
+             lambda: f"{inv.measure_distance('blk:1', 'blk:3')} mm" if abs(inv.measure_distance("blk:1", "blk:3") - 20) < 1e-3
+             else _raise(f"distance {inv.measure_distance('blk:1', 'blk:3')}"))
+
+    def rotated_bar():
+        inv.place_component(bar, 0, 0, 30, grounded=True, x_axis=(0, 1, 0), y_axis=(-1, 0, 0))
+        occ = inv._occ("bar:1"); r = occ.RangeBox
+        dy, dx = (r.MaxPoint.Y - r.MinPoint.Y) * 10, (r.MaxPoint.X - r.MinPoint.X) * 10
+        if not (abs(dy - 40) < 1e-3 and abs(dx - 10) < 1e-3):
+            _raise(f"bar spans X {dx:.1f} Y {dy:.1f}, expected 10 / 40")
+        occ.Transformation = inv._tg().CreateMatrix()          # back to +X, at the origin
+        m = occ.Transformation; m.SetTranslation(inv._tg().CreateVector(0, 0, 3.0)); occ.Transformation = m
+        return "oriented along +Y"
+    run.step("place_component with x_axis/y_axis", rotated_bar)
+    run.step("obstacle cube at y=30, z=30..50", lambda: inv.place_component(blk, 0, 30, 30, grounded=True))
+
+    def sweep():
+        occ = inv._occ("bar:1"); r0 = occ.RangeBox; x0 = r0.MaxPoint.X
+        rows = inv.sweep_rotation(["bar:1"], (0, 0, 30), (0, 0, 1), 0, 90, 30, measure_to="blk:4")
+        hit = {r["angle"]: r["collisions"] for r in rows}
+        if hit.get(0) or hit.get(30) or not hit.get(90):
+            _raise(f"collisions by angle {hit}, expected none at 0/30 and a hit at 90")
+        if abs(occ.RangeBox.MaxPoint.X - x0) > 1e-6:
+            _raise("bar not restored to its start position")
+        return f"collisions {hit}, restored"
+    run.step("sweep_rotation hits the obstacle at 90° and restores", sweep)
+
+
 def sheet_metal_box_tests(inv, run):
     """A small enclosure body: 4 flanges in ONE call (auto-miter), an inward
     front flange, holes at world coordinates, a work-plane cut that must fail,
@@ -359,6 +436,8 @@ def main():
     sheet_metal_box_tests(inv, run)
     print("\nDocuments (active document, dialog-free save):")
     document_tests(inv, run)
+    print("\nAssembly tools (import_step, placement, interference, sweep):")
+    assembly_tool_tests(inv, run)
 
     if not keep:
         print("\nClosing scratch documents...")

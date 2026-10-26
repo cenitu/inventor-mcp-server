@@ -697,19 +697,88 @@ def place_component(
     path: str,
     x: float = 0, y: float = 0, z: float = 0,
     grounded: bool = False,
+    x_axis: str = "", y_axis: str = "",
 ) -> str:
     """Place a part or sub-assembly into the active assembly. The file must exist
     on disk — save_document() the part first.
 
     Args:
         path: Full path to the .ipt / .iam file.
-        x: X position in mm.
+        x: X position in mm (where the component's origin goes).
         y: Y position in mm.
         z: Z position in mm.
         grounded: Fix the component in space. Ground the FIRST component of every
                   assembly, otherwise constraints move it instead of the others.
+        x_axis: Optional orientation — where the component's X axis points, e.g. "0,0,1".
+        y_axis: Where its Y axis points, e.g. "0,1,0" (must be perpendicular; Z = X × Y).
     """
-    return inv.place_component(path, x, y, z, grounded)
+    xa = tuple(float(v) for v in x_axis.split(",")) if x_axis.strip() else None
+    ya = tuple(float(v) for v in y_axis.split(",")) if y_axis.strip() else None
+    return inv.place_component(path, x, y, z, grounded, x_axis=xa, y_axis=ya)
+
+
+@mcp.tool()
+def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
+    """Import a vendor STEP file (hinge, lock, gland...) as Inventor files in dest_folder.
+    The STEP is copied into dest_folder first, because Inventor writes the parts of
+    an imported assembly next to the .step file (e.g. into Downloads or a synced folder).
+    Returns path, type, overall bbox and per-component bbox/volume — use them to
+    find mounting faces and axes before placing it with place_component.
+
+    Args:
+        step_path: The downloaded .step / .stp file.
+        dest_folder: Project folder to hold the Inventor files.
+        name: Base name for the .iam/.ipt (default: the STEP file name).
+    """
+    return json.dumps(inv.import_step(step_path, dest_folder, name or None), indent=1, ensure_ascii=False)
+
+
+@mcp.tool()
+def check_interference(set_a: str, set_b: str = "") -> str:
+    """Check overlap between occurrences of the active assembly. Touching faces
+    are not reported. Intended overlaps (gasket compression) show up too — read
+    the volume and bbox.
+
+    Args:
+        set_a: Comma-separated occurrence names, e.g. "PANO_KAPAK:1". Use "Asm:1/2"
+            for one part inside a sub-assembly (e.g. a vendor hinge's body).
+        set_b: Names to test against; empty = everything else.
+    """
+    a = [s.strip() for s in set_a.split(",") if s.strip()]
+    b = [s.strip() for s in set_b.split(",") if s.strip()] or None
+    hits = inv.check_interference(a, b)
+    return json.dumps(hits, indent=1, ensure_ascii=False) if hits else "No interference"
+
+
+@mcp.tool()
+def measure_distance(a: str, b: str) -> str:
+    """Minimum distance in mm between two occurrences (0 = touching/overlapping).
+    Names as in list_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
+    return f"{inv.measure_distance(a, b)} mm"
+
+
+@mcp.tool()
+def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
+                   start: float = 0, stop: float = 110, step: float = 10,
+                   against: str = "", measure_to: str = "") -> str:
+    """Rotate occurrences about an axis in steps and report collisions at each
+    angle — e.g. check a door opens 0–110° on its hinge axis without hitting the
+    body, or a lock tongue turns freely. Positions are restored afterwards.
+
+    Args:
+        moving: Comma-separated occurrences that rotate together (door + lock + door studs).
+        axis_point: A point on the axis, "x,y,z" in mm (e.g. the hinge pin).
+        axis_dir: Axis direction, e.g. "0,1,0".
+        start / stop / step: Angles in degrees.
+        against: Occurrences to test; empty = everything else.
+        measure_to: Optional occurrence to report the minimum distance to at each angle.
+    """
+    mv = [s.strip() for s in moving.split(",") if s.strip()]
+    ag = [s.strip() for s in against.split(",") if s.strip()] or None
+    pt = tuple(float(v) for v in axis_point.split(","))
+    ax = tuple(float(v) for v in axis_dir.split(","))
+    rows = inv.sweep_rotation(mv, pt, ax, start, stop, step, ag, measure_to or None)
+    return json.dumps(rows, indent=1, ensure_ascii=False)
 
 
 @mcp.tool()
