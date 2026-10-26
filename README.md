@@ -25,7 +25,8 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Features
 
-- **53 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
+- **57 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
+- **Assemblies with vendor parts**: `import_step` (keeps the files in your project folder), placement with full orientation, `check_interference` / `measure_distance`, and `sweep_rotation` to check a door or lock moves freely through its whole range
 - **Assemblies (IAM)**: place components, ground them, constrain by origin geometry (mate / flush / angle) or drop a bolt into a hole with a single Insert constraint
 - **`execute_python` power tool** — run arbitrary Python against the live COM connection with a persistent namespace (escape hatch for anything not covered by dedicated tools)
 - **Auto-reporting** — every feature operation returns a volume/topology delta (`Hole1 | V 23497 (-503 mm³) | F7 E14`), so the AI can self-verify each step
