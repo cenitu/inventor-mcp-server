@@ -169,12 +169,27 @@ def create_part(name: str = "", template: str = "metric") -> str:
 
 @mcp.tool()
 def save_document(path: str = "") -> str:
-    """Save the active document.
+    """Save the active document — never opens a dialog. Saving in place also saves
+    dependents that changed (e.g. sub-assemblies), which would otherwise trigger
+    Inventor's modal 'save dependents?' prompt and block until a user clicks OK.
 
     Args:
         path: Full file path to save as (e.g. "D:/parts/flange.ipt"). If empty, saves in place.
     """
     return inv.save_document(path or None)
+
+
+@mcp.tool()
+def list_documents() -> str:
+    """List open documents (name, path, type, unsaved changes) and which one is active.
+    Tools act on the ACTIVE document — check here when juggling several parts."""
+    return json.dumps(inv.list_documents(), indent=1, ensure_ascii=False)
+
+
+@mcp.tool()
+def activate_document(name_or_path: str) -> str:
+    """Make an open document the active one (by display name or full path)."""
+    return inv.activate_document(name_or_path)
 
 
 @mcp.tool()

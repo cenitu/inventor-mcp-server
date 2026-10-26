@@ -148,7 +148,10 @@ class InventorConnection:
                 doc.DisplayName = name
             except Exception:
                 pass  # DisplayName may be read-only before first save
-        return f"Part created: {doc.DisplayName}"
+        # Documents.Add(..., True) opens the window but does not always make it the
+        # ActiveDocument — later calls would then edit the previous document.
+        doc.Activate()
+        return f"Part created: {doc.DisplayName} (unsaved — use save_document(path))"
 
     def active_document(self):
         doc = self.app.ActiveDocument
@@ -173,14 +176,53 @@ class InventorConnection:
             )
         return doc.ComponentDefinition
 
+    def _silently(self, fn):
+        """Run fn with Inventor's SilentOperation on: no modal dialogs (e.g. the
+        'save dependents?' prompt that otherwise blocks until a user clicks OK)."""
+        prev = self.app.SilentOperation
+        self.app.SilentOperation = True
+        try:
+            return fn()
+        finally:
+            self.app.SilentOperation = prev
+
     def save_document(self, path: str | None = None) -> str:
+        """Save the active document without any dialog.
+
+        Plain Document.Save() opens a modal 'save changes to dependents?' dialog
+        whenever a referenced file was updated (e.g. an assembly whose
+        sub-assembly re-evaluated), and the API call waits until a user answers.
+        Save2(True) saves the dirty dependents too, under SilentOperation.
+        """
         doc = self.active_document()
         if path:
             path = os.path.abspath(path)
-            doc.SaveAs(path, False)
+            self._silently(lambda: doc.SaveAs(path, False))
             return f"Saved as: {path}"
-        doc.Save()
-        return f"Saved: {doc.FullFileName}"
+        dirty = [d.DisplayName for d in doc.AllReferencedDocuments if d.Dirty]
+        self._silently(lambda: doc.Save2(True))
+        extra = f" (+ {len(dirty)} dependent(s): {', '.join(dirty)})" if dirty else ""
+        return f"Saved: {doc.FullFileName}{extra}"
+
+    def list_documents(self) -> list[dict]:
+        """Open (visible) documents, the active one marked."""
+        active = self.app.ActiveDocument
+        out = []
+        for d in self.app.Documents.VisibleDocuments:
+            out.append({"name": d.DisplayName, "path": d.FullFileName or "(unsaved)",
+                        "type": {12290: "part", 12291: "assembly", 12292: "drawing"}.get(d.DocumentType, str(d.DocumentType)),
+                        "dirty": bool(d.Dirty), "active": active is not None and d.InternalName == active.InternalName})
+        return out
+
+    def activate_document(self, name_or_path: str) -> str:
+        """Make an open document active, by display name or full path."""
+        key = name_or_path.lower()
+        for d in self.app.Documents.VisibleDocuments:
+            if key in (d.DisplayName.lower(), (d.FullFileName or "").lower()):
+                d.Activate()
+                return f"Active: {d.DisplayName}"
+        names = ", ".join(d.DisplayName for d in self.app.Documents.VisibleDocuments)
+        raise ValueError(f"No open document '{name_or_path}'. Open: {names}")
 
     def export_document(self, path: str, format: str = "STEP") -> str:
         doc = self.active_document()
@@ -1495,7 +1537,8 @@ class InventorConnection:
                 doc.DisplayName = name
             except Exception:
                 pass  # read-only until first save
-        return f"Assembly created: {doc.DisplayName}"
+        doc.Activate()
+        return f"Assembly created: {doc.DisplayName} (unsaved — use save_document(path))"
 
     def place_component(
         self,

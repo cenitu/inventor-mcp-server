@@ -203,6 +203,47 @@ def sheet_metal_tests(inv, run):
         print("  FAIL  flange: find_edge returned no usable index")
 
 
+_TEMP_DIRS = []   # removed together with the scratch documents (unless --keep)
+
+
+def document_tests(inv, run):
+    """Active-document tracking and dialog-free saving (writes to a temp folder)."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="inventor_mcp_smoke_")
+    _TEMP_DIRS.append(tmp)
+    part_path = os.path.join(tmp, "doc_a.ipt")
+    run.step("create_part doc_a", lambda: inv.create_part("doc_a"))
+    run.step("create_part doc_b", lambda: inv.create_part("doc_b"))
+    run.step("newest part is the active document",
+             lambda: inv.active_document().DisplayName if inv.active_document().DisplayName == "doc_b"
+             else _raise(f"active is {inv.active_document().DisplayName}"))
+    run.step("activate_document(doc_a)", lambda: inv.activate_document("doc_a"))
+    run.step("list_documents marks doc_a active",
+             lambda: "ok" if [d for d in inv.list_documents() if d["active"]][0]["name"] == "doc_a"
+             else _raise("wrong active document"))
+    run.step("activate_document(unknown) raises",
+             lambda: _expect_error(lambda: inv.activate_document("no_such_doc"), "No open document"))
+    run.step("sketch + extrude in doc_a", lambda: (inv.create_sketch("XY"), inv.draw_rectangle(0, 0, 20, 20),
+                                                   inv.extrude(5))[2])
+    run.step("save_document(path) doc_a", lambda: inv.save_document(part_path))
+    run.step("create_assembly", lambda: inv.create_assembly("doc_asm"))
+    run.step("place doc_a", lambda: inv.place_component(part_path, 0, 0, 0, grounded=True))
+    run.step("save assembly", lambda: inv.save_document(os.path.join(tmp, "doc_asm.iam")))
+
+    def make_dependent_dirty():
+        asm = inv.active_document()
+        part = [d for d in asm.ReferencedDocuments if d.FullFileName.lower() == part_path.lower()][0]
+        part.ComponentDefinition.Parameters.UserParameters.AddByExpression("smoke_dirty", "7 mm", "mm")
+        part.Update(); asm.Update()
+        return "dependent dirty" if part.Dirty else _raise("part did not become dirty")
+    run.step("modify the referenced part (dirty dependent)", make_dependent_dirty)
+    # Before the fix this opened Inventor's modal 'save dependents?' dialog and blocked.
+    run.step("save_document saves dependents without a dialog", lambda: inv.save_document())
+    run.step("dependent is saved",
+             lambda: "ok" if not any(d.Dirty for d in inv.active_document().AllReferencedDocuments)
+             else _raise("a dependent is still unsaved"))
+
+
 def sheet_metal_box_tests(inv, run):
     """A small enclosure body: 4 flanges in ONE call (auto-miter), an inward
     front flange, holes at world coordinates, a work-plane cut that must fail,
@@ -316,6 +357,8 @@ def main():
     sheet_metal_tests(inv, run)
     print("\nSheet metal box (auto-miter, cut_on_face, corner_round):")
     sheet_metal_box_tests(inv, run)
+    print("\nDocuments (active document, dialog-free save):")
+    document_tests(inv, run)
 
     if not keep:
         print("\nClosing scratch documents...")
@@ -329,6 +372,11 @@ def main():
             except Exception:
                 pass
         print(f"  closed {closed} scratch document(s)")
+        import shutil
+        for d in _TEMP_DIRS:
+            shutil.rmtree(d, ignore_errors=True)
+        if _TEMP_DIRS:
+            print(f"  removed {len(_TEMP_DIRS)} temp folder(s)")
 
     print("\n" + "-" * 60)
     print(f"{run.passed} passed, {len(run.failed)} failed")

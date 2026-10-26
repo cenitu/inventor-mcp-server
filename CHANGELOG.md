@@ -7,10 +7,16 @@
   face (mapped with `ModelToSketchSpace`), so the face sketch's own origin and flipped axes don't
   matter. Verifies material was removed.
 - **`corner_round`** — Corner Round on sheet metal corners (also in the flat pattern).
+- **`list_documents` / `activate_document`** — see which document is active and switch by name or path.
 - **`flange`**: `auto_miter`, `miter_gap` (default `GapSize` from the rule) and `height_datum`
   options; the height is now set with `SetDistanceHeightExtent`.
 
 ### Fixed
+- **Saving no longer opens a blocking dialog.** `save_document` used `Document.Save()`, which opens
+  Inventor's modal "save changes to dependents?" prompt whenever a referenced file changed — the
+  call then waits until a user clicks OK. It now uses `Save2(True)` under `SilentOperation`.
+- **New parts/assemblies are made active.** `Documents.Add(..., True)` does not always make the new
+  document the `ActiveDocument`, so following calls could edit the previous document.
 - **Flange corners came out open.** The API's default miter gap is the sheet thickness, not the
   rule's `GapSize` the UI uses; `flange` now sets `GapSize` explicitly.
 - **`sheet_metal_cut` silently removed nothing** when the sketch was on a work plane. It now deletes
