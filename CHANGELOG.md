@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-26
 
 ### Added
 - **`import_step`** — import a vendor STEP (hinge, lock, gland) into the project folder. The STEP is
