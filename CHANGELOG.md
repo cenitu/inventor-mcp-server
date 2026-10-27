@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-27
 
 ### Fixed
 - **A modal dialog no longer freezes the server.** A call that made Inventor open a dialog (e.g.
