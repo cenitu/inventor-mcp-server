@@ -38,8 +38,9 @@ mcp = FastMCP(
         "For anything not covered by a dedicated tool, use execute_python "
         "(persistent namespace, live inv/app/comp/body/tg objects). "
         "After editing inventor_api.py on disk, call reload_api — no server restart needed. "
-        "Several Inventors (e.g. one per project, one per agent): connect(new_instance=True, "
-        "project=..., instance=<name>) starts a separate one; then pass instance=<name> to every "
+        "Working in a project: connect(project=<.ipj path>) — the server reuses the Inventor that "
+        "has it or starts a separate one, so several agents on several projects each get their own. "
+        "When several Inventors are connected, pass the instance name connect returned to every "
         "call. list_instances shows them."
     ),
 )
@@ -103,6 +104,7 @@ class _Instance:
         self.ns_created = time.time()
         self.output = None              # stdout buffer of the execute_python call in progress
         self.last_call: _Call | None = None
+        self.project = ""               # active .ipj when last seen
         self.lock = threading.Lock()    # two clients' calls arrive on two threads
         self.thread = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"inventor-{name}", initializer=self._init_thread)
@@ -388,25 +390,38 @@ def transaction(action: str = "begin", name: str = "MCP batch") -> str:
 # ---------- Connection ----------
 
 @tool(com=False)
-async def connect(visible: bool = True, new_instance: bool = False, project: str = "",
+async def connect(visible: bool = True, project: str = "", new_instance: bool = False,
             instance: Annotated[str, Field(description=(
-                "Name for this Inventor — pass the same name to later calls. "
-                "Default: 'default', or the project's name for a new_instance."))] = "") -> str:
+                "Name for this Inventor — pass the same name to later calls. Default: "
+                "'default', or the project's name when the server starts one for it."))] = "") -> str:
     """Connect to Autodesk Inventor. Starts Inventor if none is running.
 
-    Several Inventors can be driven at once — e.g. two agents on two projects. Start the
-    second one with new_instance=True (an Inventor opened by hand can't be reached: Windows
-    always hands out the first one), then pass instance=<name> to every call for it.
+    Working on a project? Pass project=<full path of its .ipj>: the server uses the
+    Inventor that already has it, or the running one if it is free to switch, or else
+    starts a separate Inventor for it — so two agents on two projects each get their own.
+    The answer names the instance; when several Inventors are connected, pass
+    instance=<that name> to every later call.
 
     Args:
         visible: Show Inventor window (default True).
-        new_instance: Start a separate Inventor of its own instead of using the running one.
-        project: Full path of an .ipj to make active. Inventor only switches projects
-                 while it has no documents open.
+        project: Full path of an .ipj to work in.
+        new_instance: Always start a separate Inventor.
     """
-    if new_instance:
-        name = instance or (os.path.splitext(os.path.basename(project))[0] if project
-                            else f"inventor{len(_instances) + 1}")
+    if project:
+        project = os.path.abspath(project)
+        if not os.path.isfile(project):
+            return f"Project file not found: {project}"
+    by_project = bool(project) and not new_instance and not instance
+    if by_project:
+        hit = next((i for i in _instances.values() if i.attached and _same_file(i.project, project)), None)
+        if hit is not None:
+            name = hit.name
+        elif not _instances[DEFAULT].attached:
+            name = DEFAULT   # the running Inventor, if it can take the project
+        else:
+            name, new_instance = _free_name(project), True
+    elif new_instance:
+        name = instance or (_free_name(project) if project else f"inventor{len(_instances) + 1}")
         if name in _instances and _instances[name].attached:
             return f"An Inventor is already connected as '{name}' — pick another instance name."
     else:
@@ -414,7 +429,8 @@ async def connect(visible: bool = True, new_instance: bool = False, project: str
     inst = _instances.setdefault(name, _Instance(name))
 
     def connect_():  # on that Inventor's thread
-        conn = _local.instance.conn
+        me = _local.instance
+        conn = me.conn
         if new_instance or not conn.is_connected():
             msg = conn.connect(visible, new_instance=new_instance)
             other = next((i.name for i in _instances.values()
@@ -426,14 +442,43 @@ async def connect(visible: bool = True, new_instance: bool = False, project: str
         else:
             msg = "Already connected"
         if project:
+            busy = conn.app.Documents.Count and not _same_file(conn.project_info()["path"], project)
+            if by_project and busy:
+                # someone works in another project here — leave it alone, start our own
+                conn._app = conn.main_hwnd = None
+                return _BUSY_WITH_OTHER_PROJECT
             msg += "\n" + conn.activate_project(project)
-        msg += f"\nInventor '{name}': pid {conn.pid}, project {conn.project_info()['name']}."
+        me.project = conn.project_info()["path"]
+        msg += f"\nInventor '{me.name}': pid {conn.pid}, project {conn.project_info()['name']}."
         if sum(i.attached for i in _instances.values()) > 1:
-            msg += f"\nSeveral Inventors are connected ({_names()}) — pass instance='{name}' to every call for this one."
+            msg += (f"\nSeveral Inventors are connected ({_names()}) — pass instance='{me.name}' "
+                    "to every call for this one.")
         return msg
 
     connect_.__name__ = "connect"
-    return await asyncio.to_thread(_on_com_thread, inst, connect_, (), {})
+    out = await asyncio.to_thread(_on_com_thread, inst, connect_, (), {})
+    if out is _BUSY_WITH_OTHER_PROJECT:
+        new_instance, by_project = True, False
+        inst = _instances.setdefault(_free_name(project), _Instance(_free_name(project)))
+        out = await asyncio.to_thread(_on_com_thread, inst, connect_, (), {})
+    return out
+
+
+_BUSY_WITH_OTHER_PROJECT = object()
+
+
+def _same_file(a: str, b: str) -> bool:
+    return bool(a and b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _free_name(project: str) -> str:
+    """An instance name for a project's own Inventor: the .ipj's name, numbered if taken."""
+    base = os.path.splitext(os.path.basename(project))[0]
+    name, n = base, 1
+    while name in _instances and _instances[name].attached:
+        n += 1
+        name = f"{base} {n}"
+    return name
 
 
 def _describe():  # on an Inventor's thread
@@ -441,6 +486,7 @@ def _describe():  # on an Inventor's thread
     if not me.conn.is_connected():
         return "closed (its Inventor is gone — connect again)"
     app, proj = me.conn.app, me.conn.project_info()
+    me.project = proj["path"]
     doc = app.ActiveDocument
     return (f"pid {me.conn.pid}, project {proj['name']} ({proj['path']}), "
             f"{app.Documents.VisibleDocuments.Count} open, active: {doc.DisplayName if doc else '-'}")
