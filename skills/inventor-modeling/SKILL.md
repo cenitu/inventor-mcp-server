@@ -105,7 +105,15 @@ inv.draw_closed_profile([[0,-50], [0,50], {"through": [50,0]}])       # arc thro
 inv.draw_slot(x=40, y=20, length=60, width=16, angle=30)              # oblong hole
 inv.draw_arc(30, 0, 0, 30, cx=0, cy=0)                                 # open arc around a center
 inv.project_edges(face_index=7)    # remodelling: copy a face's exact edges into the sketch
+inv.sketch_pattern("slot", length=40, width=8, x=-150, y=60, rows=3, columns=6, dx=60, dy=30)  # vents
+inv.sketch_pattern("circle", diameter=10, x=0, y=0, count=8, pcd=80)  # bolt circle
+inv.offset_profile(5, side="inside")                                  # groove / wall / margin
 ```
+
+Extrude says "No closed profile"? `check_sketch` lists the open ends and gaps with coordinates.
+A DXF from outside: read it as text and redraw it with these tools — a polyline's `bulge` is an
+arc (use `{"through": …}`), never a straight line; for splines or blocks use Inventor's own DXF
+import from `execute_python`.
 
 Arcs are drawn through three points, so a sketch on a face whose axes are flipped can't mirror
 them. In `execute_python`: `SketchArcs.AddByThreePoints`, `SketchArcs.AddByFillet`,

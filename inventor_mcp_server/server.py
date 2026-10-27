@@ -1210,6 +1210,56 @@ def draw_slot(x: float, y: float, length: float, width: float, angle: float = 0,
 
 
 @tool()
+def sketch_pattern(shape: str = "circle", diameter: float = 0, length: float = 0,
+                   width: float = 0, corner_radius: float = 0, angle: float = 0,
+                   x: float = 0, y: float = 0, rows: int = 1, columns: int = 1,
+                   dx: float = 0, dy: float = 0, count: int = 0, pcd: float = 0,
+                   start_angle: float = 0, sketch_index: int = 0) -> str:
+    """Many copies of one shape in one sketch — vent slots, hole grids, bolt circles — then
+    one cut makes them all. mm.
+
+    Grid: the first copy at (x, y), `rows` x `columns`, pitch `dx` (between columns) and `dy`
+    (between rows). Circle: `count` copies on a circle of diameter `pcd` around (x, y), the
+    first at `start_angle` degrees; slots and rectangles turn with the circle.
+
+    Args:
+        shape: circle (diameter), slot (length, width — overall), rectangle (length, width,
+               corner_radius).
+        angle: Turn every slot / rectangle by this many degrees (length along X at 0).
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return inv.sketch_pattern(shape, diameter, length, width, corner_radius, angle, x, y, rows,
+                              columns, dx, dy, count, pcd, start_angle,
+                              sketch_index if sketch_index > 0 else None)
+
+
+@tool()
+def check_sketch(sketch_index: int = 0) -> str:
+    """Why won't it extrude? Checks a sketch for what a closed profile needs: open ends, gaps
+    (two ends a hair apart, not joined), points where 3+ curves meet (overlaps, stray
+    lines), lines drawn twice — with sketch coordinates in mm — and whether Inventor builds a
+    profile, with how many closed loops. extrude / revolve report the same when they fail.
+
+    Args:
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return json.dumps(inv.check_sketch(sketch_index if sketch_index > 0 else None), indent=1, ensure_ascii=False)
+
+
+@tool()
+def offset_profile(distance: float, side: str = "inside", sketch_index: int = 0) -> str:
+    """Offset every closed loop of a sketch by `distance` mm — a gasket groove, a wall, a
+    lip, an inner cut-out with a margin. Lines, arcs and circles stay lines, arcs and circles.
+
+    Args:
+        distance: Offset in mm.
+        side: "inside" or "outside" of each loop.
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return inv.offset_profile(distance, side, sketch_index if sketch_index > 0 else None)
+
+
+@tool()
 def project_edges(face_index: int = 0, edge_indices: str = "", body_index: int = 1,
                   sketch_index: int = 0) -> str:
     """Project a body's edges onto the sketch — exact lines, arcs, circles and splines,

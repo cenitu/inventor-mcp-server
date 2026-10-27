@@ -1111,6 +1111,223 @@ class InventorConnection:
                           for i in range(len(dirs)) for j in range(i + 1, len(dirs))))
 
 
+    # ---------- Sketch patterns, checks, offsets ----------
+
+    _CURVES = ("SketchLines", "SketchArcs", "SketchCircles", "SketchEllipses",
+               "SketchEllipticalArcs", "SketchSplines")
+
+    def _sketch_curves(self, sketch) -> list[tuple[str, object]]:
+        """(collection name, entity) of every curve that isn't construction geometry."""
+        out = []
+        for coll in self._CURVES:
+            try:
+                c = getattr(sketch, coll)
+            except Exception:
+                continue
+            for i in range(1, c.Count + 1):
+                e = c.Item(i)
+                if not e.Construction:
+                    out.append((coll, e))
+        return out
+
+    @staticmethod
+    def _key(point) -> tuple:
+        g = point.Geometry
+        return (round(g.X * 10, 3), round(g.Y * 10, 3))
+
+    def _solid_profile(self, sketch):
+        """sketch.Profiles.AddForSolid(), with what is wrong with the sketch when it fails."""
+        try:
+            return sketch.Profiles.AddForSolid()
+        except Exception as e:
+            raise RuntimeError(f"No closed profile in {sketch.Name}: {self._sketch_problems(sketch)}") from e
+
+    def _sketch_problems(self, sketch) -> str:
+        info = self.check_sketch_of(sketch, try_profile=False)
+        return "; ".join(info["problems"]) or "no open ends found — maybe nothing is drawn"
+
+    def check_sketch(self, sketch_index: int | None = None) -> dict:
+        return self.check_sketch_of(self._get_sketch(sketch_index))
+
+    def check_sketch_of(self, sketch, try_profile: bool = True) -> dict:
+        """What a profile needs, checked: every end point shared by exactly two curves.
+        Open ends, near misses (two ends a hair apart), branches and doubled lines, with
+        coordinates in sketch mm; then whether Inventor builds a profile, and how many loops."""
+        import math
+        curves = self._sketch_curves(sketch)
+        ends, counts, lines = {}, {}, {}
+        for coll, e in curves:
+            counts[coll] = counts.get(coll, 0) + 1
+            if coll in ("SketchCircles", "SketchEllipses"):
+                continue  # closed by themselves
+            try:
+                a, b = self._key(e.StartSketchPoint), self._key(e.EndSketchPoint)
+            except Exception:
+                continue
+            for k in (a, b):
+                ends[k] = ends.get(k, 0) + 1
+            if coll == "SketchLines":
+                lines[tuple(sorted((a, b)))] = lines.get(tuple(sorted((a, b))), 0) + 1
+        open_ends = [k for k, n in ends.items() if n == 1]
+        problems = []
+        near = set()
+        for i, p in enumerate(open_ends):
+            for q in open_ends[i + 1:]:
+                d = math.dist(p, q)
+                if d < 1.0:
+                    problems.append(f"gap of {d:.3f} mm between {p} and {q} — not joined")
+                    near.update((p, q))
+        lone = [p for p in open_ends if p not in near]
+        if lone:
+            problems.append(f"{len(lone)} open end(s): " + ", ".join(map(str, lone[:10]))
+                            + (" …" if len(lone) > 10 else ""))
+        branches = [k for k, n in ends.items() if n > 2]
+        if branches:
+            problems.append(f"{len(branches)} point(s) where 3+ curves meet (overlap or a stray line): "
+                            + ", ".join(map(str, branches[:10])))
+        doubled = [k for k, n in lines.items() if n > 1]
+        if doubled:
+            problems.append(f"{len(doubled)} line(s) drawn twice: " + ", ".join(f"{a}-{b}" for a, b in doubled[:5]))
+        info = {"sketch": sketch.Name,
+                "curves": {k.replace("Sketch", "").lower(): v for k, v in counts.items()},
+                "problems": problems}
+        if try_profile:
+            try:
+                profile = sketch.Profiles.AddForSolid()
+                info["profile"] = f"ok — {profile.Count} closed loop(s)"
+                try:
+                    profile.Delete()
+                except Exception:
+                    pass
+            except Exception:
+                info["profile"] = "Inventor can't build a profile from this sketch"
+        return info
+
+    def sketch_pattern(self, shape: str = "circle", diameter: float = 0, length: float = 0,
+                       width: float = 0, corner_radius: float = 0, angle: float = 0,
+                       x: float = 0, y: float = 0, rows: int = 1, columns: int = 1,
+                       dx: float = 0, dy: float = 0, count: int = 0, pcd: float = 0,
+                       start_angle: float = 0, sketch_index: int | None = None) -> str:
+        """Many copies of one shape in one sketch, mm: a grid (first one at x, y; rows x
+        columns, pitch dx / dy) or, with count, a circle of them (center x, y, diameter pcd,
+        from start_angle; each copy turned with the circle)."""
+        import math
+        shape = shape.lower()
+        if shape not in ("circle", "slot", "rectangle"):
+            raise ValueError("shape is circle, slot or rectangle")
+        if shape == "circle" and diameter <= 0:
+            raise ValueError("circle needs diameter")
+        if shape != "circle" and (length <= 0 or width <= 0):
+            raise ValueError(f"{shape} needs length and width")
+        if count:
+            if pcd <= 0:
+                raise ValueError("a circular pattern needs pcd (the diameter it runs on)")
+            places = [(x + pcd / 2 * math.cos(math.radians(start_angle + 360 * k / count)),
+                       y + pcd / 2 * math.sin(math.radians(start_angle + 360 * k / count)),
+                       start_angle + 360 * k / count) for k in range(count)]
+        else:
+            if (rows > 1 and not dy) or (columns > 1 and not dx):
+                raise ValueError("a grid needs dx (columns) and dy (rows)")
+            places = [(x + c * dx, y + r * dy, 0.0) for r in range(rows) for c in range(columns)]
+        if len(places) > 2000:
+            raise ValueError(f"{len(places)} copies — more than 2000; use a feature pattern instead")
+        sketch = self._get_sketch(sketch_index)
+        tg = self._tg()
+        sketch.DeferUpdates = True  # no solve after every curve: much faster for many copies
+        try:
+            self._pattern_copies(sketch, tg, places, shape, diameter, length, width,
+                                 corner_radius, angle, sketch_index)
+        finally:
+            sketch.DeferUpdates = False
+        return f"{len(places)} {shape}(s) in {sketch.Name}" + (f" on PCD {pcd}" if count else f" ({rows} x {columns})")
+
+    def _pattern_copies(self, sketch, tg, places, shape, diameter, length, width,
+                        corner_radius, angle, sketch_index):
+        import math
+        for px, py, turn in places:
+            if shape == "circle":
+                sketch.SketchCircles.AddByCenterRadius(tg.CreatePoint2d(px / 10, py / 10), diameter / 20)
+            elif shape == "slot":
+                self.draw_slot(px, py, length, width, angle + turn, sketch_index)
+            else:
+                a = math.radians(angle + turn)
+                c, s = math.cos(a), math.sin(a)
+                corner = lambda u, v: [px + u * c - v * s, py + u * s + v * c] + ([corner_radius] if corner_radius else [])
+                self.draw_closed_profile([corner(-length / 2, -width / 2), corner(length / 2, -width / 2),
+                                          corner(length / 2, width / 2), corner(-length / 2, width / 2)],
+                                         sketch_index)
+
+    def offset_profile(self, distance: float, side: str = "inside",
+                       sketch_index: int | None = None) -> str:
+        """Offset every closed loop of the sketch by distance mm, inside or outside."""
+        side = side.lower()
+        if side not in ("inside", "outside"):
+            raise ValueError("side is inside or outside")
+        sketch = self._get_sketch(sketch_index)
+        loops = self._loops(sketch)
+        if not loops:
+            raise RuntimeError(f"No closed loop in {sketch.Name} to offset")
+        done = []
+        for loop in loops:
+            before = self._span(loop)
+            for natural in (True, False):
+                # one curve of the loop + IncludeConnectedEntities: Inventor refuses the whole
+                # loop handed over curve by curve ("Failed to create offset")
+                coll = self.app.TransientObjects.CreateObjectCollection()
+                coll.Add(loop[0])
+                made = list(sketch.OffsetSketchEntitiesUsingDistance(coll, distance / 10, natural, True, False))
+                after = self._span(made)
+                if (after < before) == (side == "inside"):
+                    done.append(len(made))
+                    break
+                for e in made:
+                    e.Delete()
+            else:
+                raise RuntimeError("Inventor couldn't offset a loop to the requested side")
+        return f"Offset {len(done)} loop(s) {distance} mm {side} ({sum(done)} curve(s))"
+
+    def _loops(self, sketch) -> list[list]:
+        """Closed loops of the sketch's curves, by shared end points (circles alone)."""
+        curves = [e for coll, e in self._sketch_curves(sketch)]
+        loops, rest = [], []
+        for e in curves:
+            try:
+                e.StartSketchPoint
+                rest.append(e)
+            except Exception:
+                loops.append([e])  # circle / ellipse
+        while rest:
+            loop = [rest.pop()]
+            keys = {self._key(loop[0].StartSketchPoint), self._key(loop[0].EndSketchPoint)}
+            grew = True
+            while grew:
+                grew = False
+                for e in list(rest):
+                    ks = {self._key(e.StartSketchPoint), self._key(e.EndSketchPoint)}
+                    if ks & keys:
+                        loop.append(e)
+                        rest.remove(e)
+                        keys |= ks
+                        grew = True
+            loops.append(loop)
+        return loops
+
+    def _span(self, entities) -> float:
+        """Width + height of the entities' points (circles: center ± radius), mm."""
+        xs, ys = [], []
+        for e in entities:
+            try:
+                for p in (e.StartSketchPoint, e.EndSketchPoint):
+                    xs.append(p.Geometry.X); ys.append(p.Geometry.Y)
+            except Exception:
+                pass
+            try:
+                c, r = e.CenterSketchPoint.Geometry, e.Radius
+                xs += [c.X - r, c.X + r]; ys += [c.Y - r, c.Y + r]
+            except Exception:
+                pass
+        return (max(xs) - min(xs) + max(ys) - min(ys)) * 10 if xs else 0.0
+
     # ---------- Features ----------
 
     def extrude(
@@ -1124,7 +1341,7 @@ class InventorConnection:
     ) -> str:
         comp = self.active_part()
         sketch = self._get_sketch(sketch_index)
-        profile = sketch.Profiles.AddForSolid()
+        profile = self._solid_profile(sketch)
 
         dir_map = {
             "positive": kPositiveExtentDirection,
@@ -1171,7 +1388,7 @@ class InventorConnection:
         import math
         comp = self.active_part()
         sketch = self._get_sketch(sketch_index)
-        profile = sketch.Profiles.AddForSolid()
+        profile = self._solid_profile(sketch)
 
         # Resolve axis entity: named WorkAxis (preferred) or sketch line (legacy)
         _work_axis_map = {"X": 1, "Y": 2, "Z": 3}
@@ -1931,7 +2148,7 @@ class InventorConnection:
         """
         comp = self.active_part()
         sketch = self._get_sketch(sketch_index)
-        profile = sketch.Profiles.AddForSolid()
+        profile = self._solid_profile(sketch)
         ff = comp.Features.FaceFeatures
         before = self._vol_state()
         fdef = ff.CreateFaceFeatureDefinition(profile)
@@ -2018,7 +2235,7 @@ class InventorConnection:
         """
         comp = self.active_part()
         sketch = self._get_sketch(sketch_index)
-        profile = sketch.Profiles.AddForSolid()
+        profile = self._solid_profile(sketch)
 
         cf = comp.Features.CutFeatures
         before = self._vol_state()
@@ -2083,7 +2300,7 @@ class InventorConnection:
             raise ValueError("Give at least one circle or rectangle.")
         cf = comp.Features.CutFeatures
         before = self._vol_state()
-        feat = cf.Add(cf.CreateCutDefinition(sketch.Profiles.AddForSolid()))
+        feat = cf.Add(cf.CreateCutDefinition(self._solid_profile(sketch)))
         self.active_document().Update()
         self._require_removed(feat, before, "cut_on_face")
         return f"Cut {n} shape(s) on face {face_index}: {feat.Name}{self._fmt_delta(before)}"

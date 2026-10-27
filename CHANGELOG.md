@@ -3,6 +3,15 @@
 ## 0.8.0 — 2026-10-27
 
 ### Added
+- **`sketch_pattern`** — many copies of a circle, slot or (rounded) rectangle in one sketch: a grid
+  (rows × columns, pitch) or a circle of them (count, PCD, start angle; copies turn with it) — vent
+  slots, perforations, bolt circles cut in one go. Sketch updates are deferred while drawing.
+- **`check_sketch`** — why a sketch won't extrude: open ends, gaps (two ends a hair apart), points
+  where 3+ curves meet, lines drawn twice, with sketch coordinates; whether Inventor builds a profile
+  and how many loops. `extrude`, `revolve` and the sheet metal tools now say the same when the
+  profile fails, instead of a bare E_INVALIDARG.
+- **`offset_profile`** — offset every closed loop of a sketch inside or outside (gasket groove, wall,
+  margin); lines, arcs and circles stay what they are.
 - **Arcs in sketches.** Agents had no way to draw an arc, so round corners and holes came out as
   many short lines (faceted parts). Now:
   - `draw_closed_profile` takes rounded corners `[x, y, r]` (tangent arcs, lines trimmed, tangent
