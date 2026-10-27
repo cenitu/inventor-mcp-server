@@ -64,8 +64,9 @@ missing = [t.name for t in pkg_tools if not (t.description or "").strip()]
 check("every tool has a description", not missing, ", ".join(missing))
 
 flange = next(t for t in pkg_tools if t.name == "flange")
+schema = getattr(flange, "input_schema", None) or getattr(flange, "inputSchema", {})  # mcp 2 renamed it
 check("wrapped tools keep their parameters",
-      {"edge_indices", "distance", "auto_miter"} <= set(flange.inputSchema.get("properties", {})))
+      {"edge_indices", "distance", "auto_miter"} <= set(schema.get("properties", {})))
 
 print("Inventor thread (no Inventor needed):")
 import threading, time
