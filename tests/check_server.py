@@ -193,14 +193,27 @@ check("the Inventor thread works after a cancel", out.startswith("inventor-defau
 out = run_py("print('polling')\nwhile not cancelled(): pass", timeout=0.2)
 check("execute_python(timeout) cancels the run", "timeout 0.2 s" in out,
       out.replace("\n", " | ")[:160])
+out = run_py("n = 0\nwhile not cancelled():\n    n += 1\nprint('stopped by itself')")
+out = asyncio.run(srv.cancel_call())
+check("a loop polling cancelled() stops cleanly before the interrupt",
+      "stopped by itself" in out and "CANCELLED" not in out, out.replace("\n", " | ")[:160])
+out = run_py("while True:\n    try:\n        sum(range(3000))\n    except BaseException:  # like win32com's bare excepts\n"
+             "        pass\n    sum(range(3000))")
+out = asyncio.run(srv.cancel_call())
+check("cancel_call gets through code that swallows a KeyboardInterrupt", "CANCELLED" in out,
+      out.replace("\n", " | ")[:160])
 check("cancel_call with nothing running says so", "Nothing is running" in asyncio.run(srv.cancel_call()))
 
 for i in range(60):  # a cancel that races the end of a call must not hit the next one
-    threading.Timer(0.0004 * (i % 6), lambda: srv._cancel(A, A.last_call)).start()
+    # the timer reads A.last_call when it fires: wait for it, or a late one cancels a later
+    # test's call (it did once: view_image "cancelled after 0 s")
+    timer = threading.Timer(0.0004 * (i % 6), lambda: srv._cancel(A, A.last_call))
+    timer.start()
     try:
         srv._on_com_thread(A, lambda: sum(range(30000)), (), {})
     except srv._Cancelled:
         pass
+    timer.join()
     wait_done(A)
 out = srv._on_com_thread(A, quick_job, (), {})
 check("cancels racing the end of a call never leak into the next", out.startswith("inventor-default"), out)

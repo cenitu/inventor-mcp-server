@@ -124,7 +124,7 @@ class _Call:
         self.collected = False      # call_status has returned the result
         self.cancel = threading.Event()  # cancel_call: cancelled() turns True
         self.cancelled_by = ""      # "cancel_call" or "timeout …"
-        self.interrupted = False    # cancel_call raised KeyboardInterrupt in it (once at most)
+        self.interrupted = 0        # KeyboardInterrupts raised in it by cancel_call / timeout
         self.progress = None        # (time, text) of execute_python's last progress()
         self.output = None          # execute_python's _LiveOutput
 
@@ -272,6 +272,9 @@ def _silent_call(fn, args, kwargs):
 # The Inventor thread takes no lock for this: the exception could land while it holds it.
 
 
+CANCEL_GRACE = 2.0  # s between cancelled() turning True and the KeyboardInterrupt
+
+
 class _Cancelled(Exception):
     pass
 
@@ -286,8 +289,8 @@ def _interrupt(inst: _Instance, call: _Call) -> bool:
     with inst.cancel_lock:
         inst.raising = True
         try:
-            if inst.running is call and not call.interrupted and inst.thread_id:
-                call.interrupted = True
+            if inst.running is call and inst.thread_id:
+                call.interrupted += 1
                 return _set_async_exc(inst.thread_id, KeyboardInterrupt) == 1
             return False
         finally:
@@ -306,6 +309,32 @@ def _cancel(inst: _Instance, call: _Call, by: str = "cancel_call") -> bool:
     call.cancelled_by = call.cancelled_by or by
     call.cancel.set()
     return _interrupt(inst, call)
+
+
+def _interrupt_until_done(inst: _Instance, call: _Call, tries: int = 8, gap: float = 0.5) -> bool:
+    """Raise KeyboardInterrupt again until the call ends. Once is not enough: code that
+    catches everything — win32com's own dynamic.py has bare `except:` blocks, and a loop of
+    COM calls spends most of its time in them — swallows it. Any thread; blocks."""
+    for _ in range(tries):
+        if call.future.done():
+            return True
+        _interrupt(inst, call)
+        concurrent.futures.wait([call.future], gap)
+    return call.future.done()
+
+
+def _cancel_soon(inst: _Instance, call: _Call, by: str):
+    """cancelled() turns True now; the KeyboardInterrupts follow after CANCEL_GRACE if the
+    code hasn't stopped by itself (execute_python's timeout)."""
+    call.cancelled_by = call.cancelled_by or by
+    call.cancel.set()
+
+    def later():
+        if not call.future.done():
+            _interrupt_until_done(inst, call)
+    t = threading.Timer(CANCEL_GRACE, later)
+    t.daemon = True
+    t.start()
 
 
 def _error_notes(e: BaseException) -> str:
@@ -441,10 +470,11 @@ async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
 @tool(com=False)
 async def cancel_call(instance: Instance = "") -> str:
     """Stop the running call — a long execute_python loop, a Content Center scan, a job
-    that turned out wrong. cancelled() in execute_python code turns True (poll it in long
-    loops to stop cleanly), and a KeyboardInterrupt is raised in the Inventor thread.
-    It takes effect at the next Python line: a call stuck INSIDE one COM call (a long
-    Inventor operation, or a modal dialog) stops only once that call returns."""
+    that turned out wrong. cancelled() in execute_python code turns True at once (poll it
+    in long loops to stop cleanly); code that hasn't stopped by itself after CANCEL_GRACE
+    seconds gets a KeyboardInterrupt in the Inventor thread. That takes effect at the next
+    Python line: a call stuck INSIDE one COM call (a long Inventor operation, or a modal
+    dialog) stops only once that call returns."""
     try:
         inst = _pick(instance)
     except _NoInstance as e:
@@ -452,8 +482,11 @@ async def cancel_call(instance: Instance = "") -> str:
     c = inst.last_call
     if c is None or c.future.done():
         return f"Nothing is running on Inventor '{inst.name}'."
-    await asyncio.to_thread(_cancel, inst, c)
-    await asyncio.to_thread(concurrent.futures.wait, [c.future], 3)
+    c.cancelled_by = c.cancelled_by or "cancel_call"
+    c.cancel.set()  # code polling cancelled() stops cleanly within the grace period
+    await asyncio.to_thread(concurrent.futures.wait, [c.future], CANCEL_GRACE)
+    if not c.future.done():
+        await asyncio.to_thread(_interrupt_until_done, inst, c)
     if not c.future.done():
         return (_busy_report(inst, c) + "\nIt is inside a COM call (or behind a dialog) and stops once "
                 "that returns — follow it with call_status(wait_seconds=30).")
@@ -596,7 +629,8 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
         code: Python source.
         undo_on_error: Run inside one undo transaction on the active document and roll
             it back if the code raises — no half-built sketches or work planes left behind.
-        timeout: Seconds; cancel the run after this long, as cancel_call would (0 = none).
+        timeout: Seconds; then cancelled() turns True, and the run is interrupted
+            CANCEL_GRACE s later if it hasn't stopped — as cancel_call does (0 = none).
     """
     me, call = _local.instance, _local.call
     error = _bind(me)
@@ -606,7 +640,7 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
     _capture(buf)
     txn = timer = None
     if timeout and timeout > 0:
-        timer = threading.Timer(timeout, _cancel, (me, call, f"timeout {timeout:g} s"))
+        timer = threading.Timer(timeout, _cancel_soon, (me, call, f"timeout {timeout:g} s"))
         timer.daemon = True
         timer.start()
     try:

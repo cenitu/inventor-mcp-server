@@ -6,11 +6,14 @@
 - **`call_status(wait_seconds=…)`** — waits up to 45 s (never past the call timeout) for the running
   call and returns its result as soon as it finishes, instead of agents polling it 20+ times per long
   job. The wait runs in a worker thread, so the server keeps answering other agents meanwhile.
-- **`cancel_call`** — stops the running call: `cancelled()` in `execute_python` code turns True, and a
-  `KeyboardInterrupt` is raised in the Inventor thread (`PyThreadState_SetAsyncExc`). It lands at the
-  next Python line, not inside a blocking COM call or behind a modal dialog. It can never hit the next
-  call: it is only raised while the call runs, and the thread clears a pending one when the call ends.
-- **`execute_python(timeout=…)`** — cancels the run the same way after that many seconds.
+- **`cancel_call`** — stops the running call: `cancelled()` in `execute_python` code turns True at
+  once, so a loop that polls it stops cleanly; code still running 2 s later gets a `KeyboardInterrupt`
+  in the Inventor thread (`PyThreadState_SetAsyncExc`), repeated every 0.5 s until the call ends —
+  once is not enough, win32com's own `dynamic.py` has bare `except:` blocks that swallow it, and a loop
+  of COM calls spends most of its time there. It lands at the next Python line, not inside a blocking
+  COM call or behind a modal dialog. It can never hit the next call: it is only raised while the call
+  runs, and the thread clears a pending one when the call ends.
+- **`execute_python(timeout=…)`** — cancels the run the same way after that many seconds (grace period included).
 - **Live output** — prints of a running `execute_python` show in `call_status` (and in the first "still
   running" answer) as they happen, last lines first; `progress(msg)` in the namespace sets a status
   line `call_status` shows.
