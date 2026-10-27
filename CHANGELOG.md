@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-27
 
 ### Added
 - **`frame_members`** — a steel frame from skeleton lines: each member (start, end, profile, roll,
