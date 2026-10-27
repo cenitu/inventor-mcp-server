@@ -4,6 +4,8 @@ import concurrent.futures
 import functools
 import json
 import os
+import sys
+import threading
 import time
 
 import pythoncom
@@ -41,6 +43,27 @@ inv = _api.InventorConnection()
 _exec_ns: dict = {}
 _exec_ns_created = time.time()
 _exec_output = None  # stdout buffer of the execute_python call in progress
+
+
+class _ThreadStdout:
+    """sys.stdout that sends the Inventor thread's prints to execute_python's buffer.
+    contextlib.redirect_stdout would swap stdout for the whole process — and a call can
+    now keep running in the background while other threads print."""
+
+    def __init__(self, default):
+        self.default, self.local = default, threading.local()
+
+    def _target(self):
+        return getattr(self.local, "buf", None) or self.default
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        return self._target().flush()
+
+    def __getattr__(self, name):
+        return getattr(self.default, name)
 
 
 # ---------- Inventor call thread ----------
@@ -182,7 +205,7 @@ def execute_python(code: str) -> str:
     a dialog. A call longer than the wait limit keeps running; follow it with call_status.
     Returns captured stdout (print your results!) or the traceback on error.
     """
-    import io, contextlib, traceback, math as _math
+    import io, traceback, math as _math
     global _exec_output
     ctx = {"inv": inv, "math": _math}
     try:
@@ -201,10 +224,15 @@ def execute_python(code: str) -> str:
         pass
     _exec_ns.update(ctx)
     buf = _exec_output = io.StringIO()
+    if not isinstance(sys.stdout, _ThreadStdout):
+        sys.stdout = _ThreadStdout(sys.stdout)
+    sys.stdout.local.buf = buf
     try:
-        with contextlib.redirect_stdout(buf):
+        try:
             # silent again in case this call connected first (the thread found no app)
             inv._silently(lambda: exec(compile(code, "<mcp>", "exec"), _exec_ns))
+        finally:
+            sys.stdout.local.buf = None
         out = buf.getvalue().strip()
         if len(out) > 6000:
             out = out[:6000] + "\n... (truncated at 6000 chars)"

@@ -69,7 +69,7 @@ def modal_dialogs(main_hwnd) -> list[dict]:
                 win32gui.EnumChildWindows(hwnd, child_text, texts)
             except win32gui.error:
                 pass
-            dialogs.append({"title": win32gui.GetWindowText(hwnd), "text": " | ".join(texts)[:800]})
+            dialogs.append({"title": win32gui.GetWindowText(hwnd), "text": " | ".join(texts)[:300]})
         return True
 
     win32gui.EnumWindows(top_level, None)

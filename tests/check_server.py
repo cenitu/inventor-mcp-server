@@ -99,6 +99,15 @@ out = srv.call_status()
 check("call_status returns the result once finished", "slow job done" in out, out.splitlines()[0])
 check("…only once", "already returned" in srv.call_status())
 
+import io
+default, captured = io.StringIO(), io.StringIO()
+proxy = srv._ThreadStdout(default)
+worker = threading.Thread(target=lambda: (setattr(proxy.local, "buf", captured), proxy.write("inventor")))
+worker.start(); worker.join()
+proxy.write("other thread")
+check("execute_python captures only the Inventor thread's prints",
+      captured.getvalue() == "inventor" and default.getvalue() == "other thread")
+
 print("Docs:")
 readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 m = re.search(r"\*\*(\d+) MCP tools\*\*", readme)
