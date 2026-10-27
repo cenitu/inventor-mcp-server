@@ -121,6 +121,25 @@ the next Inventor start stays as it was. Inventor refuses to switch while any do
 - Custom length: `ContentFamily.CreateMember(row, 0, "", 51969, True, full_path, NameValueMap{"B_L": mm})`
   (51969 = kUseDefaultRefreshSetting); the length is in mm. Returns the file path.
 
+## Manufacturing outputs
+
+- Flat pattern DXF: `SheetMetalComponentDefinition.DataIO.WriteDataToFile("FLAT PATTERN DXF?AcadVersion=2018&OuterProfileLayer=OUTER&InteriorProfilesLayer=INNER&InvisibleLayers=IV_TANGENT;…", path)`.
+  `HasFlatPattern` / `Unfold()` (then `FlatPattern.ExitEdit()`) creates it; `FlatPattern.Length/Width` in cm.
+- BOM: enable `BOM.PartsOnlyViewEnabled` / `StructuredViewEnabled` (+ `StructuredViewFirstLevelOnly = False`),
+  pick the view by `ViewType` (62466 structured, 62467 parts only — names are localized). Row →
+  `ComponentDefinitions.Item(1).Document` → "Design Tracking Properties".
+- Material: `doc.ActiveMaterial = libraryAsset.CopyTo(doc)` (library: `app.AssetLibraries`).
+- Drawing: `FileManager.GetTemplateFile(kDrawingDocumentObject, …)` returned "" here — glob
+  `TemplatesPath/**/Metric/ISO.idw`. `AddBaseView(model, point, scale, orientation, 32258, "", "", options)`;
+  `options["SheetMetalFoldedModel"] = False` for the flat pattern. `AddProjectedView(base, point, style[, scale])`
+  — the direction comes from the position. Overall dimensions: `GeneralDimensions.AddLinear(point,
+  sheet.CreateGeometryIntent(curve1), …(curve2), 60162 horizontal / 60163 vertical)`.
+- PDF translator `{0AC6FD96-2F4D-42CE-8BE0-8AEA580399E4}`. `NameValueMap.Value(name)` is a property
+  with a parameter: late-bound pywin32 can read it but not set it — use `Add`, or invoke
+  `DISPATCH_PROPERTYPUT` on its DISPID.
+- `DispatchEx` can hand back an Inventor that is already running (one left half-quit by a client
+  that exited right after `Quit()`) instead of starting a new one — and calls on it can hang.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,

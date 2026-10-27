@@ -1,8 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-27
 
 ### Added
+- **`flat_pattern`** — flat size, thickness and bend count of a sheet metal part, and with a path a
+  DXF/DWG for the laser: OUTER contour, INNER holes, bend lines on IV_BEND* (optional); tangent
+  lines, sketches and the like left out. Creates the flat pattern if missing.
+- **`make_drawing`** — PDF drawing of the active saved part/assembly from a template (ISO, DIN, …):
+  base view, projected views (top below, right beside), a shaded iso at half scale, overall
+  dimensions on the base view, retrieved model dimensions; `flat=True` draws the flat pattern with
+  its overall size. Largest standard scale that fits. Optionally keeps the .idw.
+- **`bom`** — parts-only or structured bill of materials: item, quantity, part number, description,
+  material, stock number, mass, file; optionally a CSV (UTF-8, `;`) for Excel / ERP.
+- **`properties`** — read and set iProperties (part number, description, stock number, vendor,
+  revision, title, cost center, custom properties) and the material from the library.
+- `connect(new_instance=True)` says so when Windows hands back an Inventor that was already running
+  instead of starting one (it can hang).
 - **`view_image`** — pictures of the active document returned as MCP images, so the agent can see
   its work: named views (iso, front, top, …; several per call), size, white background, `focus` on
   an assembly component. Sketches and work features are hidden while capturing; the camera and
