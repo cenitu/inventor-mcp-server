@@ -1866,10 +1866,58 @@ def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
 
 
 @tool()
-def list_occurrences() -> str:
+def list_occurrences(depth: int = 1) -> str:
     """Compact table of the assembly's components:
-    '[1] block:1  pos=(0.0,0.0,0.0) grounded'. Indices feed the constrain tools."""
-    return inv.list_occurrences()
+    '[1] block:1  pos=(0.0,0.0,0.0) grounded'. Indices feed the constrain tools.
+
+    Args:
+        depth: 2+ also lists the components inside sub-assemblies, with their paths
+               ("Frame:1/Post:2") for assembly_faces / constrain_faces / check_interference.
+    """
+    return inv.list_occurrences(depth)
+
+
+@tool()
+def assembly_faces(path: str, surface: str = "", normal: list[float] | None = None,
+                   at: dict | None = None, diameter: float = 0, min_area: float = 0,
+                   max_count: int = 30) -> str:
+    """Find faces of a component anywhere in the assembly — also inside sub-assemblies —
+    in TOP assembly coordinates (mm). Each result has a ref ("Sub:1/Part:1#F12") that
+    constrain_faces takes. For a sub-assembly path, every part below it is searched.
+
+    Args:
+        path: Component path from list_occurrences(depth=2), e.g. "Z AXIS:1/FIXED PLATE:1".
+        surface: "plane", "cylinder", "cone", … (empty = any).
+        normal: Outward normal of a plane, e.g. [0, 0, 1] for faces looking up.
+        at: Face center coordinates to match, e.g. {"Z": 182.5}.
+        diameter: Cylinder diameter in mm.
+        min_area: Skip faces smaller than this (mm²).
+        max_count: Most results to return.
+    """
+    return json.dumps(inv.assembly_faces(path, surface, normal, at, diameter, min_area, max_count),
+                      indent=1, ensure_ascii=False)
+
+
+@tool()
+def constrain_faces(a: str, b: str, kind: str = "mate", offset: float = 0, angle: float = 0,
+                    a_at: dict | None = None) -> str:
+    """Constrain two components by faces (refs from assembly_faces) or origin geometry
+    ("Sub:1/Part:1#XY", "#X", "#ORIGIN") — anywhere in the assembly, sub-assemblies too.
+    The constraint goes into the active (top) assembly.
+
+    Says which OTHER components the constraint moved — a constraint can drag parts through
+    others you didn't mean to touch.
+
+    Args:
+        a, b: Refs. a is the one meant to move.
+        kind: "mate" (faces against each other / axes in line), "flush" (faces the same
+              way, side by side) or "angle".
+        offset: mm for mate / flush. Its sign is easy to get wrong — give a_at too.
+        angle: Degrees for kind="angle".
+        a_at: Where a's face must end up, e.g. {"Z": 182.5}. If it lands elsewhere, the
+              offset is tried with the other sign.
+    """
+    return inv.constrain_faces(a, b, kind, offset, angle, a_at)
 
 
 @tool()

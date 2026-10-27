@@ -182,6 +182,15 @@ other two.
 - `Profiles.AddForSolid()` on an open sketch raises a bare E_INVALIDARG; Inventor's ErrorManager says
   "Failed to build a profile from sketch". Check shared end points to say where.
 
+## Faces of nested components
+
+- `ComponentOccurrence.SurfaceBodies` of an occurrence reached through `SubOccurrences` from the top
+  assembly are proxies: their faces' geometry is already in TOP assembly coordinates and they can be
+  constrained in the top assembly as they are — no `CreateGeometryProxy` chain needed.
+- A planar face's outward normal: `face.Geometry.Normal`, negated when `face.IsParamReversed`.
+- `AllLeafOccurrences` + `OccurrencePath` give every part with its path — compare their
+  `Transformation` before and after a constraint to see what it moved.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
