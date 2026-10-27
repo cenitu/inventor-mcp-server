@@ -30,6 +30,7 @@ kNewBodyOperation = 20485
 # DocumentTypeEnum
 kPartDocumentObject = 12290
 kAssemblyDocumentObject = 12291
+kDrawingDocumentObject = 12292
 
 # DimensionOrientationEnum (from Inventor 2026 type library — NOT 40706/40707/40708!)
 kHorizontalDim = 19201
@@ -107,6 +108,7 @@ class InventorConnection:
             msg = f"Connected to running Inventor {self._app.SoftwareVersion.DisplayVersion}"
         except Exception:
             try:
+                running = set(inventor_pids())
                 self._app = win32com.client.DispatchEx("Inventor.Application")
                 self._app.Visible = visible
                 import time
@@ -114,6 +116,12 @@ class InventorConnection:
                 while not self._app.Ready and time.monotonic() < deadline:
                     time.sleep(0.5)
                 msg = f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
+                pid = win32process.GetWindowThreadProcessId(int(self._app.MainFrameHWND))[1]
+                if pid in running:
+                    # an Inventor whose client went away without letting it finish quitting
+                    # can still answer CreateObject — and hang on the next call
+                    msg += (f" — but Windows handed back an Inventor that was already running "
+                            f"(pid {pid}), not a new one. If calls hang, close that Inventor.")
             except Exception as e:
                 raise RuntimeError(f"Cannot connect to Inventor: {e}")
         try:
@@ -1874,6 +1882,337 @@ class InventorConnection:
         cam.Target, cam.Eye = t, e
         cam.SetExtents(size, size)
         cam.Apply()
+
+    # ---------- Manufacturing outputs: flat pattern, BOM, properties, drawings ----------
+
+    # DXF/DWG layers Inventor writes for a flat pattern. The cut contour always goes out;
+    # bend lines are optional (press-brake marks); everything else is hidden.
+    _FLAT_HIDDEN = ("IV_TANGENT", "IV_ARC_CENTERS", "IV_TOOL_CENTER", "IV_TOOL_CENTER_DOWN",
+                    "IV_FEATURE_PROFILES", "IV_FEATURE_PROFILES_DOWN", "IV_ALTREP_FRONT",
+                    "IV_ALTREP_BACK", "IV_UNCONSUMED_SKETCHES", "IV_ROLL_TANGENT", "IV_ROLL")
+    _BEND_LAYERS = ("IV_BEND", "IV_BEND_DOWN", "IV_BEND_UP")
+
+    def flat_pattern(self, path: str = "", format: str = "DXF", bend_lines: bool = True,
+                     acad_version: str = "2018") -> dict:
+        """Flat pattern of the active sheet metal part: size, bends, and optionally a
+        DXF/DWG for the laser. Creates the flat pattern if the part has none."""
+        doc = self.active_document()
+        comp = doc.ComponentDefinition
+        if not hasattr(comp, "HasFlatPattern"):
+            raise RuntimeError(f"{doc.DisplayName} is not a sheet metal part.")
+        if not comp.HasFlatPattern:
+            self._silently(comp.Unfold)
+            try:
+                comp.FlatPattern.ExitEdit()
+            except Exception:
+                pass
+        fp = comp.FlatPattern
+        info = {"part": doc.DisplayName,
+                "flat_mm": [round(fp.Length * 10, 2), round(fp.Width * 10, 2)],
+                "thickness_mm": round(comp.Thickness.Value * 10, 3)}
+        try:
+            info["bends"] = fp.FlatBendResults.Count
+        except Exception:
+            pass
+        if path:
+            fmt = format.upper()
+            if fmt not in ("DXF", "DWG"):
+                raise ValueError("format is DXF or DWG")
+            path = os.path.abspath(path)
+            if not path.lower().endswith("." + fmt.lower()):
+                raise ValueError(f"path must end in .{fmt.lower()}")
+            if not os.path.isdir(os.path.dirname(path)):
+                raise RuntimeError(f"Folder does not exist: {os.path.dirname(path)}")
+            hidden = self._FLAT_HIDDEN + (() if bend_lines else self._BEND_LAYERS)
+            spec = (f"FLAT PATTERN {fmt}?AcadVersion={acad_version}"
+                    f"&OuterProfileLayer=OUTER&InteriorProfilesLayer=INNER"
+                    f"&InvisibleLayers={';'.join(hidden)}")
+            if os.path.exists(path):
+                os.remove(path)
+            self._silently(lambda: comp.DataIO.WriteDataToFile(spec, path))
+            if not os.path.exists(path):
+                raise RuntimeError(f"Inventor wrote no file: {path}")
+            info["file"] = path
+            info["layers"] = "OUTER (contour), INNER (holes/cut-outs)" + (", IV_BEND* (bend lines)" if bend_lines else "")
+        return info
+
+    _DTP = "Design Tracking Properties"
+    _PROPS = {"part_number": (_DTP, "Part Number"), "description": (_DTP, "Description"),
+              "stock_number": (_DTP, "Stock Number"), "vendor": (_DTP, "Vendor"),
+              "revision": ("Inventor Summary Information", "Revision Number"),
+              "title": ("Inventor Summary Information", "Title"),
+              "material": (_DTP, "Material"), "cost_center": (_DTP, "Cost Center")}
+
+    @classmethod
+    def _prop(cls, doc, key):
+        try:
+            group, name = cls._PROPS[key]
+            return doc.PropertySets.Item(group).Item(name).Value
+        except Exception:
+            return None
+
+    def _mass_kg(self, doc):
+        try:
+            return round(doc.ComponentDefinition.MassProperties.Mass, 3)
+        except Exception:
+            return None
+
+    def bom(self, view: str = "parts_only", path: str = "") -> str:
+        """Bill of materials of the active assembly — parts_only (flat, totals per part)
+        or structured (with sub-assemblies, indented). path: also write a CSV (UTF-8, ;)."""
+        doc = self.active_document()
+        if doc.DocumentType != kAssemblyDocumentObject:
+            raise RuntimeError("The active document is not an assembly.")
+        b = doc.ComponentDefinition.BOM
+        structured = view.lower().startswith("struct")
+        if structured:
+            b.StructuredViewEnabled = True
+            b.StructuredViewFirstLevelOnly = False
+        else:
+            b.PartsOnlyViewEnabled = True
+        wanted = 62466 if structured else 62467  # kStructured / kPartsOnly BOMViewType
+        bv = next(b.BOMViews.Item(i) for i in range(1, b.BOMViews.Count + 1)
+                  if b.BOMViews.Item(i).ViewType == wanted)
+        rows = []
+
+        def walk(collection, depth):
+            for i in range(1, collection.Count + 1):
+                r = collection.Item(i)
+                d = r.ComponentDefinitions.Item(1).Document
+                rows.append({"item": r.ItemNumber, "level": depth, "qty": r.ItemQuantity,
+                             "part_number": self._prop(d, "part_number") or "",
+                             "description": self._prop(d, "description") or "",
+                             "material": self._prop(d, "material") or "",
+                             "stock_number": self._prop(d, "stock_number") or "",
+                             "mass_kg": self._mass_kg(d),
+                             "file": os.path.basename(d.FullFileName)})
+                if structured and r.ChildRows is not None:
+                    walk(r.ChildRows, depth + 1)
+
+        walk(bv.BOMRows, 0)
+        cols = ["item", "qty", "part_number", "description", "material", "stock_number", "mass_kg", "file"]
+        if path:
+            import csv
+            path = os.path.abspath(path)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(cols)
+                for r in rows:
+                    w.writerow([r[c] if r[c] is not None else "" for c in cols])
+        lines = [f"BOM {doc.DisplayName} ({'structured' if structured else 'parts only'}, {len(rows)} rows)"]
+        for r in rows:
+            mass = f"{r['mass_kg']} kg" if r["mass_kg"] is not None else ""
+            lines.append(f"{'  ' * r['level']}{r['item']:>4}  {r['qty']:>4} x  {r['part_number']}"
+                         f"  | {r['description']} | {r['material']} | {mass} | {r['file']}")
+        if path:
+            lines.append(f"CSV: {path}")
+        return "\n".join(lines)
+
+    def properties(self, values: dict | None = None, material: str = "") -> dict:
+        """Read the active document's iProperties; set the given ones first. values keys:
+        part_number, description, stock_number, vendor, revision, title, cost_center, or
+        any other name (a custom property). material: a material name from the library."""
+        doc = self.active_document()
+        changed = []
+        for key, value in (values or {}).items():
+            if key in self._PROPS and key != "material":
+                group, name = self._PROPS[key]
+                doc.PropertySets.Item(group).Item(name).Value = str(value)
+            else:
+                custom = doc.PropertySets.Item("Inventor User Defined Properties")
+                try:
+                    custom.Item(key).Value = value
+                except Exception:
+                    custom.Add(value, key)
+            changed.append(key)
+        if material:
+            self._set_material(doc, material)
+            changed.append("material")
+        out = {k: self._prop(doc, k) for k in self._PROPS}
+        custom = doc.PropertySets.Item("Inventor User Defined Properties")
+        out["custom"] = {custom.Item(i).Name: custom.Item(i).Value for i in range(1, custom.Count + 1)}
+        out["mass_kg"] = self._mass_kg(doc)
+        if changed:
+            out["changed"] = changed
+        return out
+
+    def _set_material(self, doc, name: str):
+        if doc.DocumentType != kPartDocumentObject:
+            raise RuntimeError("Material is set on parts.")
+        key = name.lower()
+        for i in range(1, doc.MaterialAssets.Count + 1):  # already in the document
+            a = doc.MaterialAssets.Item(i)
+            if a.DisplayName.lower() == key:
+                doc.ActiveMaterial = a
+                return
+        libs = self.app.AssetLibraries
+        for i in range(1, libs.Count + 1):
+            assets = libs.Item(i).MaterialAssets
+            for j in range(1, assets.Count + 1):
+                a = assets.Item(j)
+                if a.DisplayName.lower() == key:
+                    doc.ActiveMaterial = a.CopyTo(doc)
+                    return
+        raise RuntimeError(f"No material {name!r} in the document or the material libraries.")
+
+    def _drawing_template(self, template: str) -> str:
+        import glob
+        if os.path.isfile(template):
+            return template
+        root = self.app.FileLocations.TemplatesPath
+        for pattern in (os.path.join(root, "Metric", f"{template}.idw"),
+                        os.path.join(root, "**", "Metric", f"{template}.idw"),
+                        os.path.join(root, "**", f"{template}.idw")):
+            found = glob.glob(pattern, recursive=True)
+            if found:
+                return found[0]
+        raise RuntimeError(f"No drawing template {template!r} under {root}")
+
+    _SCALES = (10, 5, 2, 1, 1 / 2, 1 / 5, 1 / 10, 1 / 20, 1 / 50, 1 / 100)
+
+    # Where views go, as fractions of the sheet — all above the title block (bottom right).
+    # Projected views take their direction from where they sit relative to the base view:
+    # "top" below it and "right" beside it is ISO (first angle) — the template's standard
+    # decides what Inventor calls them.
+    _SPOTS = {"top": (0.25, 0.30), "right": (0.58, 0.66), "iso": (0.85, 0.66)}
+
+    def make_drawing(self, pdf_path: str, views: str = "front,top,right,iso",
+                     template: str = "ISO", scale: float = 0, flat: bool = False,
+                     drawing_path: str = "") -> str:
+        """2D drawing of the active (saved) part or assembly: a base view, projected views,
+        overall dimensions on the base view and the model dimensions Inventor can retrieve,
+        exported to PDF. flat=True draws a sheet metal part's flat pattern (one view)."""
+        model = self.active_document()
+        if not model.FullFileName:
+            raise RuntimeError("Save the model first — a drawing references the file.")
+        pdf_path = os.path.abspath(pdf_path)
+        if not pdf_path.lower().endswith(".pdf"):
+            raise ValueError("pdf_path must end in .pdf")
+        names = [v.strip().lower() for v in views.split(",") if v.strip()]
+        base_name = "front" if flat else names[0]
+        orient = {"front": 10764, "top": 10754, "right": 10755, "left": 10758,
+                  "back": 10756, "bottom": 10757}.get(base_name)
+        if orient is None:
+            raise ValueError("The first view must be front, top, right, left, back or bottom")
+        extra = [] if flat else names[1:]
+        unknown = [n for n in extra if n not in self._SPOTS]
+        if unknown:
+            raise ValueError(f"Projected views can be {', '.join(self._SPOTS)} — not {', '.join(unknown)}")
+        comp = model.ComponentDefinition
+        if flat:
+            if not getattr(comp, "HasFlatPattern", False):
+                self.flat_pattern()  # creates it
+            size = (comp.FlatPattern.Length, comp.FlatPattern.Width)
+        else:
+            rb = comp.RangeBox
+            dx, dy, dz = (rb.MaxPoint.X - rb.MinPoint.X, rb.MaxPoint.Y - rb.MinPoint.Y,
+                          rb.MaxPoint.Z - rb.MinPoint.Z)
+            size = (max(dx, dz), max(dy, dz))
+        drawing = self.app.Documents.Add(kDrawingDocumentObject, self._drawing_template(template), True)
+        try:
+            sheet = drawing.ActiveSheet
+            cell = (0.6, 0.6) if flat else (0.28, 0.30)  # share of the sheet for the base view
+            if not scale:
+                fit = min(sheet.Width * cell[0] / max(size[0], 1e-6), sheet.Height * cell[1] / max(size[1], 1e-6))
+                scale = next((s for s in self._SCALES if s <= fit), self._SCALES[-1])
+            tg = self._tg()
+            pt = lambda fx, fy: tg.CreatePoint2d(sheet.Width * fx, sheet.Height * fy)
+            opts = self.app.TransientObjects.CreateNameValueMap()
+            if flat:
+                opts.Add("SheetMetalFoldedModel", False)
+            base = sheet.DrawingViews.AddBaseView(model, pt(0.4, 0.55) if flat else pt(0.25, 0.66),
+                                                  scale, orient, 32258, "", "", opts)  # hidden lines removed
+            placed = [base_name if not flat else "flat pattern"]
+            for name in extra:
+                if name == "iso":  # shaded, at half scale so it stays in its corner
+                    sheet.DrawingViews.AddProjectedView(base, pt(*self._SPOTS[name]), 32259, scale / 2)
+                else:
+                    sheet.DrawingViews.AddProjectedView(base, pt(*self._SPOTS[name]), 32258)
+                placed.append(name)
+            overall = self._overall_dimensions(sheet, base)
+            retrieved = 0
+            try:
+                gd = sheet.DrawingDimensions.GeneralDimensions
+                for i in range(1, sheet.DrawingViews.Count + 1):
+                    v = sheet.DrawingViews.Item(i)
+                    got = gd.GetRetrievableDimensions(v)
+                    if got is not None and got.Count:
+                        gd.Retrieve(v, got)
+                        retrieved += got.Count
+            except Exception:
+                pass
+            if drawing_path:
+                drawing_path = os.path.abspath(drawing_path)
+                self._silently(lambda: drawing.SaveAs(drawing_path, False))
+            self._export_pdf(drawing, pdf_path)
+            ratio = f"{scale:g}:1" if scale >= 1 else f"1:{1 / scale:g}"
+            return (f"Drawing of {model.DisplayName}: {', '.join(placed)}, scale {ratio}, "
+                    f"overall {' x '.join(overall) or '-'} mm, {retrieved} retrieved dimension(s), "
+                    f"sheet {sheet.Width * 10:.0f}x{sheet.Height * 10:.0f} mm"
+                    f"\nPDF: {pdf_path} ({os.path.getsize(pdf_path) // 1024} KB)"
+                    + (f"\nDrawing: {drawing_path}" if drawing_path else ""))
+        finally:
+            if not drawing_path:
+                drawing.Close(True)
+
+    def _overall_dimensions(self, sheet, view) -> list[str]:
+        """Overall width and height on a view: between its outermost vertical lines and its
+        outermost horizontal lines. Returns the values (mm) it placed."""
+        tg = self._tg()
+        lines = []
+        for i in range(1, view.DrawingCurves.Count + 1):
+            c = view.DrawingCurves.Item(i)
+            try:
+                if c.CurveType == 5123:  # kLineSegmentCurve
+                    lines.append((c, c.StartPoint, c.EndPoint))
+            except Exception:
+                pass
+        vertical = [l for l in lines if abs(l[1].X - l[2].X) < 1e-4]
+        horizontal = [l for l in lines if abs(l[1].Y - l[2].Y) < 1e-4]
+        gd = sheet.DrawingDimensions.GeneralDimensions
+        out = []
+        cx, cy = view.Center.X, view.Center.Y
+        for group, key, pos, kind in (
+                (vertical, lambda l: l[1].X, tg.CreatePoint2d(cx, view.Top + 1.2), 60162),          # horizontal dim
+                (horizontal, lambda l: l[1].Y, tg.CreatePoint2d(view.Left - 1.2, cy), 60163)):      # vertical dim
+            if len(group) < 2:
+                continue
+            a, b = min(group, key=key), max(group, key=key)
+            try:
+                dim = gd.AddLinear(pos, sheet.CreateGeometryIntent(a[0]), sheet.CreateGeometryIntent(b[0]), kind)
+                out.append(f"{dim.ModelValue * 10:g}")
+            except Exception:
+                pass
+        return out
+
+    @staticmethod
+    def _nvm_set(nvm, key, value):
+        """NameValueMap[key] = value. Value is a property with a parameter, which late-bound
+        pywin32 can only read — so put it through IDispatch directly."""
+        try:
+            nvm.Add(key, value)
+        except Exception:
+            dispid = nvm._oleobj_.GetIDsOfNames("Value")
+            nvm._oleobj_.Invoke(dispid, 0, pythoncom.DISPATCH_PROPERTYPUT, 0, key, value)
+
+    def _export_pdf(self, drawing, path: str):
+        addin = self.app.ApplicationAddIns.ItemById("{0AC6FD96-2F4D-42CE-8BE0-8AEA580399E4}")
+        if not addin.Activated:
+            addin.Activate()
+        context = self.app.TransientObjects.CreateTranslationContext()
+        context.Type = 13059  # kFileBrowseIOMechanism
+        options = self.app.TransientObjects.CreateNameValueMap()
+        if addin.HasSaveCopyAsOptions(drawing, context, options):
+            for key, value in (("All_Color_AS_Black", 0), ("Vector_Resolution", 400),
+                               ("Sheet_Range", 14082)):  # kPrintAllSheets
+                self._nvm_set(options, key, value)
+        medium = self.app.TransientObjects.CreateDataMedium()
+        medium.FileName = path
+        if os.path.exists(path):
+            os.remove(path)
+        self._silently(lambda: addin.SaveCopyAs(drawing, context, options, medium))
+        if not os.path.exists(path):
+            raise RuntimeError(f"PDF export wrote no file: {path}")
 
     # ---------- Content Center ----------
     #

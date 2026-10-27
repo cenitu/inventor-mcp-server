@@ -1277,6 +1277,72 @@ def place_component(
     return inv.place_component(path, x, y, z, grounded, x_axis=xa, y_axis=ya)
 
 
+# ---------- Manufacturing outputs ----------
+
+@tool()
+def flat_pattern(path: str = "", format: str = "DXF", bend_lines: bool = True) -> str:
+    """Flat pattern of the active sheet metal part: flat size, thickness, bend count — and with
+    a path, a DXF/DWG for the laser / punch (layers OUTER = contour, INNER = holes and
+    cut-outs, IV_BEND* = bend lines; tangent lines, sketches etc. left out). Creates the
+    flat pattern if the part has none.
+
+    Args:
+        path: Output file (.dxf or .dwg). Empty: just report the flat size.
+        format: DXF or DWG.
+        bend_lines: Include the bend lines (on their own layers).
+    """
+    return json.dumps(inv.flat_pattern(path, format, bend_lines), indent=1, ensure_ascii=False)
+
+
+@tool()
+def bom(view: str = "parts_only", path: str = "") -> str:
+    """Bill of materials of the active assembly: item, quantity, part number, description,
+    material, stock number, mass, file. For purchasing / ERP — set part numbers and
+    descriptions first with properties().
+
+    Args:
+        view: "parts_only" (every part once with its total quantity) or "structured"
+              (sub-assemblies with their parts indented).
+        path: Also write a CSV (UTF-8, ';'-separated) — opens in Excel.
+    """
+    return inv.bom(view, path)
+
+
+@tool()
+def properties(values: dict | None = None, material: str = "") -> str:
+    """Read — and optionally set — the active document's iProperties: part number,
+    description, stock number, vendor, revision, title, cost center, material, mass and
+    custom properties. These feed the BOM and the drawing's title block.
+
+    Args:
+        values: e.g. {"part_number": "BRS-101", "description": "Side panel 2 mm",
+                "stock_number": "DKP-2.0"}. Unknown keys become custom properties.
+        material: Material name as in Inventor's library (e.g. "Steel, Mild").
+    """
+    return json.dumps(inv.properties(values, material), indent=1, ensure_ascii=False, default=str)
+
+
+@tool()
+def make_drawing(pdf_path: str, views: str = "front,top,right,iso", template: str = "ISO",
+                 scale: float = 0, flat: bool = False, drawing_path: str = "") -> str:
+    """2D drawing of the active part or assembly (saved to disk) → PDF for the shop floor.
+    A base view, projected views around it, overall dimensions on the base view (between
+    its outermost straight edges — check them on assemblies), the model dimensions
+    Inventor can retrieve, and the template's title block (filled from properties()).
+    Read the PDF back to check the layout.
+
+    Args:
+        pdf_path: Output .pdf.
+        views: First is the base view (front/top/right/left/back/bottom); the rest are
+               projected from it: top (placed below), right (beside), iso (shaded, half scale).
+        template: Drawing template name (ISO, DIN, ANSI (mm) …) or a full .idw path.
+        scale: 0 = largest standard scale that fits; or e.g. 0.2 for 1:5.
+        flat: Sheet metal part: draw the flat pattern (one view).
+        drawing_path: Also keep the drawing as .idw / .dwg (otherwise it is closed).
+    """
+    return inv.make_drawing(pdf_path, views, template, scale, flat, drawing_path)
+
+
 @tool()
 def content_center(category: str = "", family: str = "", size: str = "",
                    length: float = 0, file_name: str = "") -> str:
