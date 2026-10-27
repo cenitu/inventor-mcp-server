@@ -50,6 +50,7 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 - Windows with **Autodesk Inventor** (developed on Inventor 2026, also verified on **Inventor 2027**; older versions may need enum adjustments — see [docs/inventor-api-notes.md](docs/inventor-api-notes.md))
 - **Python 3.12+**
 - `pip install "mcp[cli]" pywin32` — MCP Python SDK **1.x and 2.x** are both supported (2.x renamed `FastMCP` to `MCPServer`; the server detects which is installed)
+- An MCP client — used daily with **Claude Code** and **Claude Desktop** (several agents at once, see below)
 
 ## Installation
 
@@ -82,9 +83,9 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
    > Configs written for 0.2.x that point at `src/server.py` still work — that file now forwards to the
    > `inventor_mcp_server` package — but please update them; the shim will be removed in a later release.
 
-   **Alternatively, install it as a package** — no clone needed, and the config gets a plain command:
+   **Alternatively, install it from PyPI** — no clone needed, and the config gets a plain command:
    ```
-   pip install git+https://github.com/cenitu/inventor-mcp-server.git
+   pip install inventor-mcp-server
    ```
    ```json
    { "mcpServers": { "inventor": { "command": "inventor-mcp-server" } } }
@@ -93,7 +94,63 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 4. Restart the MCP client (MCP servers load at session start), start Inventor, then ask your AI assistant to build something.
 
-> **Avoid `win32com.client.gencache.EnsureDispatch` and `CastTo`** in your own scripts against the same Python install — they generate a `gen_py` cache that breaks plain `GetActiveObject` (`KeyError: '_dispobj_'`). The server itself is immune since 0.4.1 (it never uses gen_py classes), but your scripts aren't: delete `%LOCALAPPDATA%\Temp\gen_py` if it happens. See the API notes for the full story.
+> **Avoid `win32com.client.gencache.EnsureDispatch` and `CastTo`** in your own scripts against the same Python install — they generate a `gen_py` cache that breaks plain `GetActiveObject` (`KeyError: '_dispobj_'`). The server itself is immune since 0.5.0 (it never uses gen_py classes), but your scripts aren't: delete `%LOCALAPPDATA%\Temp\gen_py` if it happens. See the API notes for the full story.
+
+## Claude Desktop
+
+Claude Desktop reads the same `mcpServers` block from `claude_desktop_config.json` — use the full path
+of the Python that has `mcp` and `pywin32` installed (a bare `python` may be a different one):
+
+```json
+{
+  "mcpServers": {
+    "inventor": {
+      "command": "C:/Users/<you>/AppData/Local/Programs/Python/Python312/python.exe",
+      "args": ["C:/path/to/inventor-mcp-server/inventor_mcp_server/server.py"]
+    }
+  }
+}
+```
+
+Two things that cost us an afternoon:
+
+- **Where the file is.** The Microsoft Store build of Claude Desktop does not use
+  `%APPDATA%\Claude\claude_desktop_config.json`. It keeps its data in
+  `%LOCALAPPDATA%\Claude-Data\claude_<id>\claude_desktop_config.json` (the `<id>` is the package id,
+  e.g. `claude_pzs8sxrjxfjjc`). If an edit seems ignored, look in `%LOCALAPPDATA%\Claude\Logs\main.log`
+  — its paths show which folder the app really uses.
+- **Edit it only while Claude Desktop is fully closed.** The app writes its in-memory copy of the file
+  back when it quits, so an edit made while it runs is silently thrown away. Quit from the tray icon
+  (closing the window is not enough), edit, start it again. `Settings → Developer` should then list
+  `inventor` as running; its log is `%LOCALAPPDATA%\Claude\Logs\mcp-server-inventor.log`.
+
+## Several agents, several projects
+
+Claude Desktop starts **one** server for all its chats, so several agents share it. Each agent gets its
+own Inventor:
+
+1. Tell each agent only its project: *"Work in C:\…\Kiosk.ipj."* It calls `connect(project=…)` — the
+   server reuses the Inventor that already has that project, takes the running one if it is free, or
+   starts a separate Inventor named after the project.
+2. With several connected, every call carries `instance=<name>` (the agent learns the name from
+   `connect`); a call without it is refused instead of guessing. `list_instances` shows them all.
+3. Each Inventor has its own call thread, `execute_python` namespace and `call_status`, so one agent's
+   long job doesn't hold up the others.
+
+Things to know:
+
+- **Let the server start the Inventors.** Open at most one by hand. Windows hands every client the first
+  Inventor that started, so a second one opened by hand can't be reached (`list_instances` lists it as
+  unreachable).
+- **Restarting Claude Desktop (or the server) loses the extra Inventors.** They keep running, but the new
+  server can only reach the first one. Before restarting — e.g. to pick up a new version — have the
+  agents save, and close every Inventor but the first; afterwards each agent connects to its project
+  again. Its open documents are best reopened from disk.
+- **Don't run tests in an agent's Inventor.** `python tests/smoke_test.py --own` starts its own Inventor
+  and quits it. Exit your own scripts a few seconds after `app.Quit()`: a process that ends right away
+  can leave a windowless `Inventor.exe` behind — which Windows may later hand to the next client that
+  asks for a new Inventor. Tell an agent's Inventor from such a leftover by its open documents, not by
+  its start time.
 
 ## Smoke test
 
@@ -104,13 +161,14 @@ release or verify your install:
 ```
 python tests/smoke_test.py            # starts Inventor if needed; closes only the docs it created
 python tests/smoke_test.py --keep     # leave the test documents open for inspection
+python tests/smoke_test.py --own      # in a separate Inventor it starts and quits — safe while agents work
 ```
 
 It also checks every hard-coded enum constant against the live COM type library, so a
 renumbered enum in a future release shows up as a named failure instead of a cryptic
 COM error. Exit code = number of failed steps.
 
-Current results: **61/61 pass on Inventor 2027 and 2027.1** (Python 3.12, mcp 2.0).
+Current results: **118/118 pass on Inventor 2027.1** (Python 3.12, mcp 1.29 and 2.3).
 
 `tests/assembly_smoke_test.py` does the same for the assembly tools — it builds a
 plate and a pin on disk, places them, and exercises mate / flush / angle / insert
