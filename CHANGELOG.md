@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`view_image`** — pictures of the active document returned as MCP images, so the agent can see
+  its work: named views (iso, front, top, …; several per call), size, white background, `focus` on
+  an assembly component. Sketches and work features are hidden while capturing; the camera and
+  visibility are restored, so the user's view doesn't jump.
+
 ## 0.5.1 — 2026-10-27
 
 ### Added

@@ -1792,6 +1792,89 @@ class InventorConnection:
         return (f"Placed '{occ.Name}' at ({x},{y},{z})mm{state} "
                 f"[occurrence {idx} of {comp.Occurrences.Count}]")
 
+    # ---------- Pictures of the model ----------
+
+    VIEWS = {"iso": 10759, "iso_left": 10760, "iso_bottom": 10761, "front": 10764, "back": 10756,
+             "top": 10754, "bottom": 10757, "left": 10758, "right": 10755, "current": 10765}
+
+    _CLUTTER = ("Sketches", "Sketches3D", "UserWorkPlanes", "UserWorkAxes", "UserWorkPoints",
+                "OriginWorkPlanes", "OriginWorkAxes", "OriginWorkPoints")
+
+    def view_images(self, views=("iso",), width: int = 800, height: int = 600,
+                    white: bool = False, focus: str = "", sketches: bool = False) -> list[str]:
+        """Render the active document from each named view into PNG files and return their
+        paths. The camera is put back afterwards, so the user's view doesn't jump.
+        focus: an occurrence name — zoom to that component instead of the whole model."""
+        import tempfile
+        unknown = [v for v in views if v not in self.VIEWS]
+        if unknown:
+            raise ValueError(f"Unknown view {', '.join(unknown)} — use {', '.join(self.VIEWS)}")
+        self.active_document()
+        view = self.app.ActiveView
+        cam = view.Camera
+        saved = (cam.Eye, cam.Target, cam.UpVector, cam.Perspective)
+        box = self._occurrence_box(focus) if focus else None
+        colors = ()
+        if white:
+            colors = (self.app.TransientObjects.CreateColor(255, 255, 255),) * 2  # top, bottom
+        folder = tempfile.mkdtemp(prefix="inventor-view-")
+        paths = []
+        shown = {}
+        if not sketches:  # sketches and work features hide the shape in a picture
+            vis = self.app.ActiveDocument.ObjectVisibility
+            for prop in self._CLUTTER:
+                try:
+                    shown[prop] = getattr(vis, prop)
+                    setattr(vis, prop, False)
+                except Exception:
+                    pass
+        try:
+            for name in views:
+                if name != "current":
+                    cam.ViewOrientationType = self.VIEWS[name]
+                    cam.Perspective = False
+                    cam.Fit()
+                    cam.Apply()
+                if box is not None:
+                    self._zoom_to(cam, box)
+                path = os.path.join(folder, f"{name}.png")
+                cam.SaveAsBitmap(path, int(width), int(height), *colors)
+                paths.append(path)
+        finally:
+            cam.Eye, cam.Target, cam.UpVector = saved[0], saved[1], saved[2]
+            cam.Perspective = saved[3]
+            cam.Apply()
+            for prop, value in shown.items():
+                try:
+                    setattr(self.app.ActiveDocument.ObjectVisibility, prop, value)
+                except Exception:
+                    pass
+        return paths
+
+    def _occurrence_box(self, name: str):
+        comp = self.active_assembly()
+        occ = next((comp.Occurrences.Item(i) for i in range(1, comp.Occurrences.Count + 1)
+                    if comp.Occurrences.Item(i).Name.lower() == name.lower()), None)
+        if occ is None:
+            raise RuntimeError(f"No component named {name!r} (see list_occurrences)")
+        return occ.RangeBox
+
+    @staticmethod
+    def _zoom_to(cam, box):
+        """Keep the view direction, center on the box and frame it with some margin."""
+        lo, hi = box.MinPoint, box.MaxPoint
+        center = [(a + b) / 2 for a, b in ((lo.X, hi.X), (lo.Y, hi.Y), (lo.Z, hi.Z))]
+        size = max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z) * 1.3
+        eye, target = cam.Eye, cam.Target
+        d = [eye.X - target.X, eye.Y - target.Y, eye.Z - target.Z]
+        t = cam.Target
+        t.X, t.Y, t.Z = center
+        e = cam.Eye
+        e.X, e.Y, e.Z = (c + v for c, v in zip(center, d))
+        cam.Target, cam.Eye = t, e
+        cam.SetExtents(size, size)
+        cam.Apply()
+
     # ---------- Content Center ----------
     #
     # Walking the whole Content Center tree takes minutes, so it is navigated by a category

@@ -147,6 +147,27 @@ check("the server answers one agent while another's call runs",
 A.conn._app = None
 del srv._instances["second"]
 
+print("Pictures (no Inventor needed):")
+import base64, tempfile
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def fake_views(self, views, width, height, white, focus, sketches):
+    folder = tempfile.mkdtemp()
+    paths = [os.path.join(folder, f"{v}.png") for v in views]
+    for p in paths:
+        open(p, "wb").write(PNG)
+    return paths
+
+
+real_views = srv._api.InventorConnection.view_images
+srv._api.InventorConnection.view_images = fake_views
+result = asyncio.run(pkg.mcp.call_tool("view_image", {"views": "iso,top"}))
+srv._api.InventorConnection.view_images = real_views
+blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
+kinds = [getattr(b, "type", None) for b in blocks]
+check("view_image reaches the client as images", kinds == ["image", "image"], str(kinds))
+
 import io
 default, captured = io.StringIO(), io.StringIO()
 proxy = srv._ThreadStdout(default)

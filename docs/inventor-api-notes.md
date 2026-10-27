@@ -121,6 +121,14 @@ the next Inventor start stays as it was. Inventor refuses to switch while any do
 - Custom length: `ContentFamily.CreateMember(row, 0, "", 51969, True, full_path, NameValueMap{"B_L": mm})`
   (51969 = kUseDefaultRefreshSetting); the length is in mm. Returns the file path.
 
+## Pictures
+
+`View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
+TopColor, BottomColor)` does (both colors, e.g. white for a plain background). Set
+`Camera.ViewOrientationType` (ViewOrientationTypeEnum: iso top-right 10759, front 10764, top 10754,
+right 10755, …), `Fit()`, `Apply()`, save, then put Eye/Target/UpVector back. 800×600 takes ~0.6 s.
+`Document.ObjectVisibility.Sketches` / `UserWorkPlanes` / `OriginWorkPlanes` … hide the clutter.
+
 ## Processes left behind
 
 An Inventor started with `DispatchEx` keeps running after the client process exits. After
