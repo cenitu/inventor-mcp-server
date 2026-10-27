@@ -171,6 +171,17 @@ other two.
   geometry — a D shape (line + arc through a point) collapsed to a single point. Constrain only
   rounded corners.
 
+## Sketch offset and many copies
+
+- `PlanarSketch.OffsetSketchEntitiesUsingDistance(entities, distance, NaturalOffsetDirection,
+  IncludeConnectedEntities, CreateOffsetConstraints)`: hand it ONE curve of a closed loop with
+  IncludeConnectedEntities = True. The whole loop curve by curve fails ("Failed to create offset")
+  either way. Which side NaturalOffsetDirection means isn't documented — offset, measure, and redo
+  the other way if needed.
+- `PlanarSketch.DeferUpdates = True` while drawing many curves, then False.
+- `Profiles.AddForSolid()` on an open sketch raises a bare E_INVALIDARG; Inventor's ErrorManager says
+  "Failed to build a profile from sketch". Check shared end points to say where.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
