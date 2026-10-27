@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A modal dialog no longer freezes the server.** A call that made Inventor open a dialog (e.g.
+  `Documents.Open` → "resolved to a different file — use it?", or `Save` → "save dependents?") never
+  returned, and because tools ran on the server's event loop every later call — read-only ones
+  included — timed out too, until someone clicked the dialog. Now:
+  - every call runs with `SilentOperation` on, so Inventor answers its own prompts with the default
+    (this includes `execute_python`, which did not use it before);
+  - calls run on a dedicated Inventor thread and the tool waits at most 50 s
+    (`INVENTOR_MCP_CALL_TIMEOUT`). A call still running then returns with the open dialog's title and
+    text — read from the window list, no COM call — or "still working" for a long job;
+  - a call is refused, with the same report, while a dialog is open or another call is running.
+- **Immune to a `gen_py` cache.** If anything on the machine ran `CastTo` / `gencache.EnsureDispatch`
+  for the Inventor type library, `connect` failed with `KeyError: '_dispobj_'` and a generic
+  `Document` (e.g. from `Documents.Open`) hid `ComponentDefinition`. The server now never uses gen_py
+  classes; every object is late-bound with type info.
+
+### Added
+- **`call_status`** — follow a call that outlived the wait: elapsed time, open dialog, `execute_python`
+  output so far, and its result once finished.
+- **`status`** shows the `execute_python` namespace's age and the names defined in it.
+
 ## 0.4.0 — 2026-10-26
 
 ### Added

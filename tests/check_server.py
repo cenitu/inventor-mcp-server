@@ -63,6 +63,52 @@ check("tool names are unique", len(names) == len(set(names)))
 missing = [t.name for t in pkg_tools if not (t.description or "").strip()]
 check("every tool has a description", not missing, ", ".join(missing))
 
+flange = next(t for t in pkg_tools if t.name == "flange")
+schema = getattr(flange, "input_schema", None) or getattr(flange, "inputSchema", {})  # mcp 2 renamed it
+check("wrapped tools keep their parameters",
+      {"edge_indices", "distance", "auto_miter"} <= set(schema.get("properties", {})))
+
+print("Inventor thread (no Inventor needed):")
+import threading, time
+srv = pkg
+srv.CALL_TIMEOUT = 0.5
+gate = threading.Event()
+
+
+def slow_job():
+    gate.wait(5)
+    return "slow job done"
+
+
+def quick_job():
+    return threading.current_thread().name
+
+
+out = srv._on_com_thread(quick_job, (), {})
+check("calls run on the Inventor thread", out.startswith("inventor-com"), out)
+out = srv._on_com_thread(slow_job, (), {})
+check("a long call returns before the client times out", "keeps running" in out, out.splitlines()[0])
+out = srv._on_com_thread(quick_job, (), {})
+check("the next call is refused while one is running", "NOT started" in out)
+check("call_status reports the running call", "running for" in srv.call_status())
+gate.set()
+for _ in range(50):
+    if srv._last_call.future.done():
+        break
+    time.sleep(0.05)
+out = srv.call_status()
+check("call_status returns the result once finished", "slow job done" in out, out.splitlines()[0])
+check("…only once", "already returned" in srv.call_status())
+
+import io
+default, captured = io.StringIO(), io.StringIO()
+proxy = srv._ThreadStdout(default)
+worker = threading.Thread(target=lambda: (setattr(proxy.local, "buf", captured), proxy.write("inventor")))
+worker.start(); worker.join()
+proxy.write("other thread")
+check("execute_python captures only the Inventor thread's prints",
+      captured.getvalue() == "inventor" and default.getvalue() == "other thread")
+
 print("Docs:")
 readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 m = re.search(r"\*\*(\d+) MCP tools\*\*", readme)

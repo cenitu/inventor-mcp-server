@@ -2,7 +2,15 @@
 
 import os
 import win32com.client
+import win32com.client.gencache
 import pythoncom
+
+# Never wrap COM objects in makepy (gen_py) classes, even when a cache exists. Something
+# else on the machine — a script calling CastTo or gencache.EnsureDispatch — creates one
+# for the Inventor type library, and from then on GetActiveObject fails with
+# KeyError '_dispobj_' and a generic Document hides ComponentDefinition. Late-bound
+# objects (with type info) expose every member of the real object.
+win32com.client.gencache.GetClassForCLSID = lambda clsid: None
 
 
 # Inventor 2026 enum constants (from type library)
@@ -32,9 +40,46 @@ kLineSegmentCurve = 5123
 kCircleCurve      = 5124
 
 
+def modal_dialogs(main_hwnd) -> list[dict]:
+    """Modal dialogs Inventor is showing, read from the window list — no COM call,
+    so it works while an API call is stuck behind the dialog.
+
+    A modal dialog disables Inventor's main window; the dialog is then a visible,
+    enabled top-level window of the same process. Returns [{title, text}].
+    """
+    import win32gui
+    import win32process
+
+    if not main_hwnd or not win32gui.IsWindow(main_hwnd) or win32gui.IsWindowEnabled(main_hwnd):
+        return []
+    pid = win32process.GetWindowThreadProcessId(main_hwnd)[1]
+    dialogs = []
+
+    def child_text(hwnd, texts):
+        t = win32gui.GetWindowText(hwnd).strip()
+        if t and win32gui.IsWindowVisible(hwnd) and t not in texts:
+            texts.append(t)
+        return True
+
+    def top_level(hwnd, _):
+        if (hwnd != main_hwnd and win32gui.IsWindowVisible(hwnd) and win32gui.IsWindowEnabled(hwnd)
+                and win32process.GetWindowThreadProcessId(hwnd)[1] == pid):
+            texts = []
+            try:
+                win32gui.EnumChildWindows(hwnd, child_text, texts)
+            except win32gui.error:
+                pass
+            dialogs.append({"title": win32gui.GetWindowText(hwnd), "text": " | ".join(texts)[:300]})
+        return True
+
+    win32gui.EnumWindows(top_level, None)
+    return dialogs
+
+
 class InventorConnection:
     def __init__(self):
         self._app = None
+        self.main_hwnd = None  # Inventor's main window, for modal_dialogs()
 
     @property
     def app(self):
@@ -48,15 +93,19 @@ class InventorConnection:
         pythoncom.CoInitialize()
         try:
             self._app = win32com.client.GetActiveObject("Inventor.Application")
-            return f"Connected to running Inventor {self._app.SoftwareVersion.DisplayVersion}"
+            msg = f"Connected to running Inventor {self._app.SoftwareVersion.DisplayVersion}"
         except Exception:
-            pass
+            try:
+                self._app = win32com.client.Dispatch("Inventor.Application")
+                self._app.Visible = visible
+                msg = f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
+            except Exception as e:
+                raise RuntimeError(f"Cannot connect to Inventor: {e}")
         try:
-            self._app = win32com.client.Dispatch("Inventor.Application")
-            self._app.Visible = visible
-            return f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
-        except Exception as e:
-            raise RuntimeError(f"Cannot connect to Inventor: {e}")
+            self.main_hwnd = int(self._app.MainFrameHWND)
+        except Exception:
+            self.main_hwnd = None
+        return msg
 
     def is_connected(self) -> bool:
         if self._app is None:

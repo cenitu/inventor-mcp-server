@@ -77,6 +77,26 @@ smcd = CastTo(part_doc.ComponentDefinition, "SheetMetalComponentDefinition")
 ```
 (Dynamic dispatch reaches `comp.Features.FlangeFeatures` directly — no cast.)
 
+**The server is immune (0.4.1+).** A cache also appears when an AI session calls `CastTo` in
+`execute_python` — typed objects make it look necessary: a `Document` from `Documents.Open` is
+typed as the generic `Document` interface and hides `ComponentDefinition`. `inventor_api.py` sets
+`win32com.client.gencache.GetClassForCLSID = lambda clsid: None` at import, so pywin32 never wraps
+anything in a gen_py class in the server process: `GetActiveObject` works with a cache present, and
+every object is late-bound *with* type info (`Item(1)` etc. still work). Two things that don't work
+instead: `win32com.client.dynamic.Dispatch(obj._oleobj_)` (methods with type info still wrap their
+results through gencache) and `DumbDispatch` (no type info → parameterized properties like
+`Documents.Item` raise "member not found").
+
+## Modal dialogs block API calls
+
+An API call that makes Inventor open a dialog does not return until someone answers it — e.g.
+`Documents.Open` of an assembly whose reference was resolved to a different file ("Do you really
+want to use the resolved document?"), or `Save` with dirty dependents ("save dependents?").
+`app.SilentOperation = True` makes Inventor take the default answer instead; the server sets it
+around every call. A modal dialog disables Inventor's main window (`app.MainFrameHWND`), so a stuck
+call is diagnosable without COM: the dialog is a visible, enabled top-level window of the same
+process (`win32gui.EnumWindows`), and its child windows carry the message text.
+
 ## Chamfer — API changed in 2026
 
 `CreateChamferDefinition()` was **removed**. Use:
