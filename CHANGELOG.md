@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Added
+- **`surface_to_solid`** — imported vendor models that came in as surfaces (no volume, no mass, no
+  booleans) become solids: the part's visible surfaces are knitted; a shell with holes gets a boundary
+  patch per loop of open edges and is knitted again; a shell that is already closed becomes a solid
+  base feature. Reports each step, the solids' volumes, and the open edges it couldn't close.
+  `KnitFeatures.Add` fails with E_FAIL on a single closed shell (nothing to stitch) — which is what an
+  agent hit on every attempt.
 - **Materials for many parts.** Parts were created on "Generic" and given materials one by one later.
   - `set_material(material, parts="*PLATE*,*BRACKET*", only_generic, path)` — every matching part of
     the assembly at once; Content Center and library parts are left alone;

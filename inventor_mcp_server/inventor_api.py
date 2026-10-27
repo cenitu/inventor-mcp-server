@@ -3150,6 +3150,159 @@ class InventorConnection:
         if not os.path.exists(path):
             raise RuntimeError(f"PDF export wrote no file: {path}")
 
+    # ---------- Surfaces to a solid ----------
+    #
+    # What works (Inventor 2027.1, tested): KnitFeatures.Add(surfaces, tolerance, False) makes a
+    # solid when it gets SEVERAL surfaces that close up — but fails (E_FAIL) on one surface that
+    # is already a closed shell, there is nothing to stitch. That one becomes a solid as a
+    # NonParametricBaseFeature with OutputType kSolidOutputType. A shell with holes in it gets
+    # a BoundaryPatch per loop of open edges first.
+
+    def _visible_surfaces(self, comp, which: str = "all") -> list:
+        ws = [comp.WorkSurfaces.Item(i) for i in range(1, comp.WorkSurfaces.Count + 1)]
+        if which and which != "all":
+            picked = {int(s) for s in which.replace(" ", "").split(",") if s}
+            ws = [w for i, w in enumerate(ws, 1) if i in picked]
+        return [w for w in ws if w.Visible and w.SurfaceBodies.Count]
+
+    @staticmethod
+    def _open_edges(body) -> list:
+        return [body.Edges.Item(i) for i in range(1, body.Edges.Count + 1) if body.Edges.Item(i).Faces.Count == 1]
+
+    @staticmethod
+    def _edge_loops(edges) -> list[list]:
+        """Group open edges into loops by the vertices they share."""
+        def key(v):
+            p = v.Point
+            return (round(p.X, 5), round(p.Y, 5), round(p.Z, 5))
+        loops, rest = [], list(edges)
+        while rest:
+            loop = [rest.pop()]
+            ends = {key(loop[0].StartVertex), key(loop[0].StopVertex)}
+            grew = True
+            while grew:
+                grew = False
+                for e in list(rest):
+                    ks = {key(e.StartVertex), key(e.StopVertex)}
+                    if ks & ends:
+                        loop.append(e)
+                        rest.remove(e)
+                        ends |= ks
+                        grew = True
+            loops.append(loop)
+        return loops
+
+    def _solids(self, comp) -> list:
+        b = comp.SurfaceBodies
+        return [b.Item(i) for i in range(1, b.Count + 1) if b.Item(i).IsSolid]
+
+    def surface_to_solid(self, work_surfaces: str = "all", tolerance: float = 0.01,
+                         patch_holes: bool = True) -> dict:
+        """Turn the active part's surfaces (imported vendor models, x_t / IGES) into solids:
+        stitch them, patch the holes left in the shell, and close it into a solid."""
+        doc = self.active_document()
+        comp = self.active_part()
+        tol = tolerance / 10.0
+        surfaces = self._visible_surfaces(comp, work_surfaces)
+        if not surfaces:
+            raise RuntimeError("No visible surfaces in this part (WorkSurfaces) — nothing to convert.")
+        solids_before = len(self._solids(comp))
+        report = {"surfaces": len(surfaces), "steps": []}
+        coll = self.app.TransientObjects.CreateObjectCollection()
+        for w in surfaces:
+            coll.Add(w)
+
+        # 1. several surfaces: knit them straight into a solid if they close up
+        if len(surfaces) > 1:
+            try:
+                self._silently(lambda: comp.Features.KnitFeatures.Add(coll, tol, False))
+                doc.Update()
+            except Exception:
+                pass
+            report["steps"].append("knitted into a solid" if len(self._solids(comp)) > solids_before
+                                   else "knitted, but the shell has holes")
+        if len(self._solids(comp)) == solids_before:
+            # 2. make one shell (quilt) to find the holes in
+            if len(surfaces) > 1:
+                n = comp.WorkSurfaces.Count
+                try:
+                    self._silently(lambda: comp.Features.KnitFeatures.Add(coll, tol, True))
+                    doc.Update()
+                    quilts = [comp.WorkSurfaces.Item(i) for i in range(n + 1, comp.WorkSurfaces.Count + 1)]
+                except Exception:
+                    raise RuntimeError("Inventor couldn't stitch these surfaces at all — try a larger tolerance")
+            else:
+                quilts = surfaces
+            for q in quilts:
+                for bi in range(1, q.SurfaceBodies.Count + 1):
+                    body = q.SurfaceBodies.Item(bi)
+                    self._close_shell(comp, doc, q, body, tol, patch_holes, report)
+        solids = self._solids(comp)[solids_before:]
+        report["solids"] = [{"volume_mm3": round(s.Volume(0.0001) * 1000, 1), "faces": s.Faces.Count} for s in solids]
+        if not solids:
+            report["result"] = "no solid — see steps / open_edges"
+        return report
+
+    def _close_shell(self, comp, doc, ws, body, tol, patch_holes, report):
+        """One shell: patch its open loops, then knit shell + patches into a solid; a closed
+        shell on its own becomes a solid base feature."""
+        open_edges = self._open_edges(body)
+        if not open_edges:
+            tb = self.app.TransientBRep.Copy(body)
+            npb = comp.Features.NonParametricBaseFeatures
+            dfn = npb.CreateDefinition()
+            c = self.app.TransientObjects.CreateObjectCollection()
+            c.Add(tb)
+            dfn.BRepEntities = c
+            dfn.OutputType = 90114  # kSolidOutputType
+            self._silently(lambda: npb.AddByDefinition(dfn))
+            ws.Visible = False
+            doc.Update()
+            report["steps"].append(f"closed shell of {body.Faces.Count} faces → solid")
+            return
+        loops = self._edge_loops(open_edges)
+        if not patch_holes:
+            report["steps"].append(f"{len(loops)} hole(s) left open (patch_holes=False)")
+            report["open_edges"] = self._where(open_edges)
+            return
+        n = comp.WorkSurfaces.Count
+        patched, failed = 0, []
+        for loop in loops:
+            dfn = comp.Features.BoundaryPatchFeatures.CreateBoundaryPatchDefinition()
+            ec = self.app.TransientObjects.CreateEdgeCollection()
+            for e in loop:
+                ec.Add(e)
+            try:
+                dfn.BoundaryPatchLoops.Add(ec)
+                self._silently(lambda: comp.Features.BoundaryPatchFeatures.Add(dfn))
+                patched += 1
+            except Exception:
+                failed.extend(loop)
+        doc.Update()
+        patches = [comp.WorkSurfaces.Item(i) for i in range(n + 1, comp.WorkSurfaces.Count + 1)]
+        report["steps"].append(f"{patched} of {len(loops)} hole(s) patched")
+        if failed:
+            report["open_edges"] = self._where(failed)
+            return
+        c = self.app.TransientObjects.CreateObjectCollection()
+        c.Add(ws)
+        for p in patches:
+            c.Add(p)
+        try:
+            self._silently(lambda: comp.Features.KnitFeatures.Add(c, tol, False))
+            doc.Update()
+            report["steps"].append("shell + patches knitted into a solid")
+        except Exception:
+            report["steps"].append("shell + patches still don't close — gaps wider than the tolerance?")
+
+    @staticmethod
+    def _where(edges) -> list[str]:
+        out = []
+        for e in edges[:12]:
+            a, b = e.StartVertex.Point, e.StopVertex.Point
+            out.append(f"({a.X * 10:.2f}, {a.Y * 10:.2f}, {a.Z * 10:.2f}) – ({b.X * 10:.2f}, {b.Y * 10:.2f}, {b.Z * 10:.2f})")
+        return out + ([f"… {len(edges) - 12} more"] if len(edges) > 12 else [])
+
     # ---------- Content Center ----------
     #
     # Walking the whole Content Center tree takes minutes, so it is navigated by a category

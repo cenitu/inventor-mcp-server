@@ -1726,6 +1726,23 @@ def properties(values: dict | None = None, material: str = "", mass_kg: float = 
 
 
 @tool()
+def surface_to_solid(work_surfaces: str = "all", tolerance: float = 0.01, patch_holes: bool = True) -> str:
+    """Turn surfaces into solids — imported vendor models (x_t, IGES, STEP) that came in as
+    faces with no volume, so no mass and no booleans. Stitches the part's visible surfaces,
+    patches the holes left in the shell, and closes it into a solid; a shell that is already
+    closed becomes a solid directly. Reports each step, the solids' volumes, and the open
+    edges it couldn't close (coordinates in mm). Run it in the part that holds the surfaces.
+
+    Args:
+        work_surfaces: "all", or WorkSurface numbers "1,2,5" to convert one group at a time
+                       (e.g. one component of a multi-part import).
+        tolerance: Largest gap to stitch over, mm.
+        patch_holes: Fill loops of open edges with a boundary patch.
+    """
+    return json.dumps(inv.surface_to_solid(work_surfaces, tolerance, patch_holes), indent=1, ensure_ascii=False)
+
+
+@tool()
 def list_materials(search: str = "") -> str:
     """Material names in Inventor's libraries, e.g. search="steel" or "alum" — the exact
     names set_material / properties / create_part take."""
