@@ -1,17 +1,26 @@
 """Wrapper around Autodesk Inventor COM API."""
 
 import os
-import win32com.client
-import win32com.client.gencache
-import pythoncom
-import win32process
+import sys
+
+# Inventor runs only on Windows. Elsewhere (a registry's Linux build check) the module still
+# imports, so the server starts and lists its tools; every Inventor call then says why it can't run.
+WINDOWS = sys.platform == "win32"
+NOT_WINDOWS = ("This server drives Autodesk Inventor through COM, so it needs Windows with "
+               "Inventor installed. The tools are listed here but can't run on this machine.")
+if WINDOWS:
+    import win32com.client
+    import win32com.client.gencache
+    import pythoncom
+    import win32process
 
 # Never wrap COM objects in makepy (gen_py) classes, even when a cache exists. Something
 # else on the machine — a script calling CastTo or gencache.EnsureDispatch — creates one
 # for the Inventor type library, and from then on GetActiveObject fails with
 # KeyError '_dispobj_' and a generic Document hides ComponentDefinition. Late-bound
 # objects (with type info) expose every member of the real object.
-win32com.client.gencache.GetClassForCLSID = lambda clsid: None
+if WINDOWS:
+    win32com.client.gencache.GetClassForCLSID = lambda clsid: None
 
 
 # Inventor 2026 enum constants (from type library)
@@ -206,10 +215,11 @@ def modal_dialogs(main_hwnd) -> list[dict]:
     return dialogs
 
 
-try:
-    from . import keeper as _keeper
-except ImportError:  # run as a script: inventor_api is imported from its own folder
-    import keeper as _keeper
+if WINDOWS:
+    try:
+        from . import keeper as _keeper
+    except ImportError:  # run as a script: inventor_api is imported from its own folder
+        import keeper as _keeper
 
 
 def keeper(start: bool = True):
