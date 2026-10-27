@@ -3321,24 +3321,35 @@ class InventorConnection:
             self.active_document().Update()
         return rows
 
-    def list_occurrences(self) -> str:
+    def list_occurrences(self, depth: int = 1) -> str:
         """Compact table of the assembly's components:
-        '[i] block:1  pos=(0.0,0.0,0.0) grounded'
+        '[i] block:1  pos=(0.0,0.0,0.0) grounded'. depth > 1 also lists what is inside
+        sub-assemblies, indented, with the path ("Sub:1/Part:1") other tools take.
         """
         comp = self.active_assembly()
         lines = []
-        for i in range(1, comp.Occurrences.Count + 1):
-            occ = comp.Occurrences.Item(i)
-            t = occ.Transformation.Translation
+
+        def row(occ, label, level, path):
+            t = occ.Transformation.Translation  # top assembly coordinates, also when nested
             flags = []
             if occ.Grounded:
                 flags.append("grounded")
             if occ.Suppressed:
                 flags.append("suppressed")
-            lines.append(
-                f"[{i}] {occ.Name}  pos=({t.X * 10:.1f},{t.Y * 10:.1f},{t.Z * 10:.1f})"
-                + ("  " + " ".join(flags) if flags else "")
-            )
+            if occ.SubOccurrences.Count:
+                flags.append(f"sub-assembly, {occ.SubOccurrences.Count} inside")
+            lines.append(f"{'  ' * level}{label} {occ.Name}  pos=({t.X * 10:.1f},{t.Y * 10:.1f},{t.Z * 10:.1f})"
+                         + ("  " + " ".join(flags) if flags else "")
+                         + (f"  path={path}" if level else ""))
+            if level + 1 < depth and not occ.Suppressed:
+                subs = occ.SubOccurrences
+                for j in range(1, subs.Count + 1):
+                    s = subs.Item(j)
+                    row(s, "-", level + 1, f"{path}/{s.Name}")
+
+        for i in range(1, comp.Occurrences.Count + 1):
+            occ = comp.Occurrences.Item(i)
+            row(occ, f"[{i}]", 0, occ.Name)
         return "\n".join(lines) if lines else "(no components placed)"
 
     def ground_occurrence(self, index: int, grounded: bool = True) -> str:
@@ -3355,6 +3366,198 @@ class InventorConnection:
         name = occ.Name
         occ.Delete()
         return f"Deleted occurrence: {name} ({comp.Occurrences.Count} left)"
+
+    # ---------- Faces of nested components, constraints by face ----------
+    #
+    # A component is named by its path from the top assembly, "Sub:1/Part:1". Faces come from
+    # the occurrence's SurfaceBodies — proxies, so geometry is in TOP assembly coordinates and
+    # the face can be constrained there directly. A face is referenced as "path#F12" (body 1)
+    # or "path#B2F3"; origin geometry as "path#XY" / "#X" / "#ORIGIN".
+
+    _SURFACES = {5890: "plane", 5891: "cylinder", 5892: "elliptic cylinder", 5893: "cone",
+                 5895: "torus", 5896: "sphere", 5897: "bspline"}
+
+    def _leaves(self, occ, path: str):
+        """Part occurrences at and below occ (whose path is `path`), with their paths."""
+        out = []
+
+        def walk(o, path):
+            subs = o.SubOccurrences
+            if subs.Count:
+                for i in range(1, subs.Count + 1):
+                    s = subs.Item(i)
+                    walk(s, f"{path}/{s.Name}")
+            else:
+                out.append((path, o))
+        walk(occ, path)
+        return out
+
+    def _face_info(self, face) -> dict:
+        st = face.SurfaceType
+        rb = face.Evaluator.RangeBox
+        center = [round((a + b) / 2 * 10, 3) for a, b in ((rb.MinPoint.X, rb.MaxPoint.X),
+                                                           (rb.MinPoint.Y, rb.MaxPoint.Y),
+                                                           (rb.MinPoint.Z, rb.MaxPoint.Z))]
+        info = {"type": self._SURFACES.get(st, str(st)),
+                "area_mm2": round(face.Evaluator.Area * 100, 1), "center": center}
+        g = face.Geometry
+        if st == 5890:
+            n = g.Normal
+            s = -1 if face.IsParamReversed else 1  # outward normal of the face
+            info["normal"] = [round(s * n.X, 4) + 0.0, round(s * n.Y, 4) + 0.0, round(s * n.Z, 4) + 0.0]
+        elif st in (5891, 5893):
+            a, p = g.AxisVector, g.BasePoint
+            info["axis"] = [round(a.X, 4) + 0.0, round(a.Y, 4) + 0.0, round(a.Z, 4) + 0.0]
+            info["axis_point"] = [round(p.X * 10, 3), round(p.Y * 10, 3), round(p.Z * 10, 3)]
+            if st == 5891:
+                info["diameter"] = round(g.Radius * 20, 3)
+        return info
+
+    def assembly_faces(self, path: str, surface: str = "", normal=None, at: dict | None = None,
+                       diameter: float = 0, min_area: float = 0, max_count: int = 30,
+                       tolerance: float = 0.05) -> list[dict]:
+        """Faces of a component (and everything below it, for a sub-assembly), in top
+        assembly coordinates, filtered: surface type, outward normal (planes), center
+        coordinates at={"Z": 182.5}, cylinder diameter, minimum area. Each with a ref for
+        constrain_faces."""
+        import math
+        leaves = self._leaves(self._occ(path), path)
+        want_n = None
+        if normal is not None:
+            ln = math.sqrt(sum(float(c) ** 2 for c in normal))
+            want_n = [float(c) / ln for c in normal]
+        out = []
+        for leaf_path, occ in leaves:
+            bodies = occ.SurfaceBodies
+            for bi in range(1, bodies.Count + 1):
+                faces = bodies.Item(bi).Faces
+                for fi in range(1, faces.Count + 1):
+                    f = faces.Item(fi)
+                    st = self._SURFACES.get(f.SurfaceType, "")
+                    if surface and st != surface.lower():
+                        continue
+                    info = self._face_info(f)
+                    if info["area_mm2"] < min_area:
+                        continue
+                    if want_n is not None and (
+                            "normal" not in info or sum(a * b for a, b in zip(info["normal"], want_n)) < 0.9998):
+                        continue
+                    if at and any(abs(info["center"]["XYZ".index(k.upper())] - float(v)) > tolerance
+                                  for k, v in at.items()):
+                        continue
+                    if diameter and abs(info.get("diameter", -1) - diameter) > tolerance:
+                        continue
+                    info["ref"] = f"{leaf_path}#{'B%d' % bi if bi > 1 else ''}F{fi}"
+                    out.append(info)
+                    if len(out) >= max_count:
+                        return out
+        return out
+
+    def _ref(self, ref: str):
+        """(geometry in the top assembly, occurrence) for "path#F12" / "path#B2F3" / "path#XY"."""
+        import re
+        path, _, geo = ref.partition("#")
+        if not geo:
+            raise ValueError(f"{ref!r}: give a face or origin geometry after '#', e.g. '{ref}#F3' or '{ref}#XY'")
+        occ = self._occ(path)
+        g = geo.upper()
+        if g in ("XY", "XZ", "YZ", "X", "Y", "Z", "ORIGIN"):
+            return self._origin_proxy(occ, g), occ
+        m = re.fullmatch(r"(?:B(\d+))?F(\d+)", g)
+        if not m:
+            raise ValueError(f"{ref!r}: after '#' use F<n>, B<n>F<n> or XY/XZ/YZ/X/Y/Z/ORIGIN")
+        bodies = occ.SurfaceBodies
+        if not bodies.Count:
+            raise ValueError(f"{path} has no bodies — faces belong to parts; give the path down to one")
+        return bodies.Item(int(m[1] or 1)).Faces.Item(int(m[2])), occ
+
+    def _poses(self, comp) -> dict:
+        """Position and axes of every part occurrence (mm), to see what a change moved."""
+        poses = {}
+        leaves = comp.Occurrences.AllLeafOccurrences
+        for i in range(1, leaves.Count + 1):
+            o = leaves.Item(i)
+            m = o.Transformation
+            poses[self._path_of(o)] = [round(m.Cell(r, c) * (10 if c == 4 else 1), 4)
+                                       for r in (1, 2, 3) for c in (1, 2, 3, 4)]
+        return poses
+
+    @staticmethod
+    def _path_of(occ) -> str:
+        try:
+            path = occ.OccurrencePath
+            return "/".join(path.Item(i).Name for i in range(1, path.Count + 1))
+        except Exception:
+            return occ.Name
+
+    def constrain_faces(self, a: str, b: str, kind: str = "mate", offset: float = 0,
+                        angle: float = 0, a_at: dict | None = None) -> str:
+        """Constrain two faces / origin geometries of components anywhere in the assembly
+        (refs from assembly_faces, or "path#XY"). a_at={"Z": 182.5}: where a's face must end
+        up — if it lands elsewhere, the offset is tried with the other sign. Reports every
+        other component the constraint moved."""
+        import math
+        comp = self.active_assembly()
+        doc = self.active_document()
+        ga, occ_a = self._ref(a)
+        gb, occ_b = self._ref(b)
+        k = kind.lower()
+        before = self._poses(comp)
+
+        def add(off):
+            if k == "mate":
+                return comp.Constraints.AddMateConstraint(ga, gb, off / 10.0)
+            if k == "flush":
+                return comp.Constraints.AddFlushConstraint(ga, gb, off / 10.0)
+            if k == "angle":
+                return comp.Constraints.AddAngleConstraint(ga, gb, math.radians(angle))
+            raise ValueError(f"Unknown kind '{kind}'. Use mate, flush or angle.")
+
+        def where():
+            ga2, _ = self._ref(a)  # re-resolve: the proxy is fresh after the update
+            info = self._face_info(ga2) if hasattr(ga2, "SurfaceType") else None
+            return info["center"] if info else None
+
+        def lands():
+            if not a_at:
+                return True
+            c = where()
+            return c is not None and all(abs(c["XYZ".index(ax.upper())] - float(v)) < 0.05 for ax, v in a_at.items())
+
+        c = add(offset)
+        doc.Update()
+        flipped = False
+        if not lands() and offset and k in ("mate", "flush"):
+            c.Delete()
+            c = add(-offset)
+            doc.Update()
+            flipped = True
+        note = ""
+        if a_at and not lands():
+            note = f"\nWARNING: {a} is at {where()}, not at {a_at} — check the faces and the offset."
+        elif flipped:
+            note = f"\n(offset {offset} put it on the wrong side; used {-offset} — {a} is now at {a_at})"
+        health = ""
+        try:
+            h = health_name(self.app, c.HealthStatus)
+            if h not in ("kUpToDateHealth", "11777"):
+                health = f"\nConstraint health: {h} — it conflicts with others or can't be solved."
+        except Exception:
+            pass
+        after = self._poses(comp)
+        moved_self = {self._path_of(occ_a), self._path_of(occ_b)}
+        moved = []
+        for p, m in after.items():
+            old = before.get(p)
+            if old is None or p in moved_self:
+                continue
+            d = [round(m[i] - old[i], 3) for i in (3, 7, 11)]
+            turned = any(abs(m[i] - old[i]) > 1e-4 for i in (0, 1, 2, 4, 5, 6, 8, 9, 10))
+            if any(abs(v) > 0.01 for v in d) or turned:
+                moved.append(f"{p} Δ({d[0]}, {d[1]}, {d[2]}) mm" + (" and turned" if turned else ""))
+        also = ("\nALSO MOVED (other constraints dragged them): " + "; ".join(moved)) if moved else ""
+        what = f"{angle}°" if k == "angle" else f"offset {-offset if flipped else offset}mm"
+        return f"{k.capitalize()} '{c.Name}': {a} ↔ {b} ({what}){note}{health}{also}"
 
     def _origin_proxy(self, occ, geometry: str):
         """Resolve 'XY' / 'X' / 'ORIGIN' on an occurrence to an assembly-context

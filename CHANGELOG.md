@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Faces of nested components.** `assembly_faces(path, surface, normal, at, diameter)` finds faces of
+  a component anywhere in the assembly ("Sub:1/Part:1"; a sub-assembly path searches every part in
+  it), in top assembly coordinates, each with a ref ("Sub:1/Part:1#F12"). Agents had to walk
+  occurrence → SubOccurrences → SurfaceBodies → Faces and filter by hand every time.
+- **`constrain_faces(a, b, kind, offset, a_at)`** — mate / flush / angle between those faces or origin
+  geometry ("path#XY") of components at any depth. `a_at={"Z": 182.5}` says where a's face must end
+  up; a wrong offset sign is corrected. It reports every OTHER component the constraint moved —
+  constraints that dragged parts out of place went unnoticed before.
+- `list_occurrences(depth=2)` lists the components inside sub-assemblies with their paths.
+
 ## 0.8.0 — 2026-10-27
 
 ### Added
