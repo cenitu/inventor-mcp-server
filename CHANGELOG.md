@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-10-27
 
 ### Added
 - **`content_center`** — browse the Content Center step by step (category path → families → sizes)
