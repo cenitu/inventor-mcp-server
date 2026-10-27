@@ -202,6 +202,23 @@ other two.
 - A structural Content Center member created without a custom length is 0.001 mm long
   ("U 80 - 0,001") — no mass, wrong in the BOM.
 
+## Surfaces to a solid
+
+Tested on 2027.1 with a 100×60×20 box (120000 mm³) and a Ø40×30 cylinder:
+- `KnitFeatures.Add(surfaces, MaximumTolerance cm, MaintainAsSurface)` with `False` makes a solid
+  when it gets **several** surfaces that close up (six face surfaces → 120000 mm³). On ONE surface
+  that is already a closed shell it fails with E_FAIL, whatever the input type (WorkSurface,
+  SurfaceBody, faces) — there is nothing to stitch.
+- A closed shell becomes a solid as `NonParametricBaseFeatures.AddByDefinition(def)` with
+  `def.BRepEntities = [TransientBRep.Copy(shell)]` and `def.OutputType = 90114` (kSolidOutputType).
+- A shell with a hole: knit with `MaintainAsSurface = True` (one quilt), take its open edges
+  (`edge.Faces.Count == 1`), group them into loops, `BoundaryPatchFeatures` per loop
+  (`def.BoundaryPatchLoops.Add(EdgeCollection)`), then knit quilt + patches with `False` → solid.
+  Knit only the new quilt and patches; the surfaces the first knit consumed are hidden and fail if
+  passed again.
+- Surfaces live in `WorkSurfaces`, not `SurfaceBodies`; a knit hides the WorkSurfaces it consumed.
+- A transient body's face can't be deleted (`Face.Delete` fails on TransientBRep copies).
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
