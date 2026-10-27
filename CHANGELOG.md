@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-10-27
 
 ### Added
 - **`call_status(wait_seconds=…)`** — waits up to 45 s (never past the call timeout) for the running
