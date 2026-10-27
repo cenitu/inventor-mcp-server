@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`connect(project=...)` finds or starts the right Inventor.** It reuses a connected Inventor that
+  already has the project, else the running Inventor if it can switch (no documents open, or already
+  in that project), else starts a separate Inventor named after the project. An agent only needs to
+  know its project — not whether another agent is already working. An Inventor with documents open
+  in another project is left alone.
+
 ## 0.5.0 — 2026-10-27
 
 ### Fixed
