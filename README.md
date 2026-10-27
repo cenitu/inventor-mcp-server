@@ -143,10 +143,12 @@ Things to know:
 - **Let the server start the Inventors.** Open at most one by hand. Windows hands every client the first
   Inventor that started, so a second one opened by hand can't be reached (`list_instances` lists it as
   unreachable).
-- **Restarting Claude Desktop (or the server) loses the extra Inventors.** They keep running, but the new
-  server can only reach the first one. Before restarting — e.g. to pick up a new version — have the
-  agents save, and close every Inventor but the first; afterwards each agent connects to its project
-  again. Its open documents are best reopened from disk.
+- **Restarting Claude Desktop (or the server) keeps the Inventors.** Every Inventor the server starts is
+  handed to a small keeper process (`keeper.py`) that outlives the server; after the restart each agent's
+  `connect(project=…)` gets the same Inventor back, open documents and all (`connect(pid=…)` picks one
+  explicitly; `list_instances` shows them). The keeper lets go of an Inventor when its window closes
+  and exits on its own when it holds none. Inventors opened by hand — and ones started by a server
+  older than 0.7 — are not kept: save and close those before restarting.
 - **Don't run tests in an agent's Inventor.** `python tests/smoke_test.py --own` starts its own Inventor
   and quits it. Exit your own scripts a few seconds after `app.Quit()`: a process that ends right away
   can leave a windowless `Inventor.exe` behind — which Windows may later hand to the next client that
