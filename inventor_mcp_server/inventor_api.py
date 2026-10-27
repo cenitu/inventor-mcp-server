@@ -109,6 +109,10 @@ class InventorConnection:
             try:
                 self._app = win32com.client.DispatchEx("Inventor.Application")
                 self._app.Visible = visible
+                import time
+                deadline = time.monotonic() + 60
+                while not self._app.Ready and time.monotonic() < deadline:
+                    time.sleep(0.5)
                 msg = f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
             except Exception as e:
                 raise RuntimeError(f"Cannot connect to Inventor: {e}")
@@ -277,7 +281,34 @@ class InventorConnection:
         finally:
             self.app.SilentOperation = prev
 
-    def save_document(self, path: str | None = None) -> str:
+    _EXTENSIONS = {12290: (".ipt",), 12291: (".iam",), 12292: (".idw", ".dwg"), 12293: (".ipn",)}
+
+    def _check_save_path(self, doc, path: str, overwrite: bool) -> bool:
+        """Raise a clear error for a path Inventor's SaveAs would reject with E_INVALIDARG.
+        Returns True when path is the document's own file (save in place instead)."""
+        folder, name = os.path.split(path)
+        stem, ext = os.path.splitext(name)
+        bad = sorted(set('<>:"|?*') & set(name))
+        if bad or not stem:
+            raise RuntimeError(f"Invalid file name {name!r}" + (f" — remove {' '.join(bad)}" if bad else ""))
+        allowed = self._EXTENSIONS.get(doc.DocumentType)
+        if allowed and ext.lower() not in allowed:
+            raise RuntimeError(f"{doc.DisplayName} must be saved as {' or '.join(allowed)}, not {ext or 'no extension'}")
+        if not os.path.isdir(folder):
+            raise RuntimeError(f"Folder does not exist: {folder} (a '/' or '\\' in the name starts a folder)")
+        if doc.FullFileName and os.path.normcase(doc.FullFileName) == os.path.normcase(path):
+            return True
+        if os.path.exists(path):
+            other = next((d.DisplayName for d in self.app.Documents
+                          if d.FullFileName and os.path.normcase(d.FullFileName) == os.path.normcase(path)), None)
+            if other:
+                raise RuntimeError(f"{path} is open in Inventor ({other}) — pick another name or close it first")
+            if not overwrite:
+                raise RuntimeError(f"{path} already exists — pick another name, or overwrite=True to replace it")
+            os.remove(path)
+        return False
+
+    def save_document(self, path: str | None = None, overwrite: bool = False) -> str:
         """Save the active document without any dialog.
 
         Plain Document.Save() opens a modal 'save changes to dependents?' dialog
@@ -288,12 +319,34 @@ class InventorConnection:
         doc = self.active_document()
         if path:
             path = os.path.abspath(path)
-            self._silently(lambda: doc.SaveAs(path, False))
-            return f"Saved as: {path}"
+            if not self._check_save_path(doc, path, overwrite):
+                self._silently(lambda: doc.SaveAs(path, False))
+                return f"Saved as: {path}"
         dirty = [d.DisplayName for d in doc.AllReferencedDocuments if d.Dirty]
         self._silently(lambda: doc.Save2(True))
         extra = f" (+ {len(dirty)} dependent(s): {', '.join(dirty)})" if dirty else ""
         return f"Saved: {doc.FullFileName}{extra}"
+
+    def unsaved_documents(self) -> list[str]:
+        """Names of open documents that were never saved to disk."""
+        return [d.DisplayName for d in self.app.Documents if not d.FullFileName]
+
+    def close_unsaved(self, include_active: bool = False) -> str:
+        """Close never-saved documents without saving — not ones another document references."""
+        active = self.app.ActiveDocument
+        closed, kept = [], []
+        for d in list(self.app.Documents):
+            if d.FullFileName:
+                continue
+            if active is not None and d.InternalName == active.InternalName and not include_active:
+                kept.append(f"{d.DisplayName} (active)")
+            elif d.ReferencingDocuments.Count:
+                kept.append(f"{d.DisplayName} (used by {d.ReferencingDocuments.Item(1).DisplayName})")
+            else:
+                closed.append(d.DisplayName)
+                d.Close(True)
+        msg = f"Closed {len(closed)} never-saved document(s)" + (f": {', '.join(closed)}" if closed else "")
+        return msg + (f". Kept: {', '.join(kept)}" if kept else "")
 
     def list_documents(self) -> list[dict]:
         """Open (visible) documents, the active one marked."""
@@ -755,17 +808,34 @@ class InventorConnection:
             hole_arg = diameter_cm
             type_str = f"drilled D={diameter}mm"
 
-        if depth <= 0:
-            feature = hf.AddDrilledByThroughAllExtent(
-                placement, hole_arg, kNegativeExtentDirection
-            )
-            extent_str = "through-all"
-        else:
-            depth_cm = depth / 10.0
-            feature = hf.AddDrilledByDistanceExtent(
-                placement, hole_arg, depth_cm, kNegativeExtentDirection
-            )
-            extent_str = f"{depth}mm deep"
+        def add(arg, dist):
+            if depth <= 0:
+                return hf.AddDrilledByThroughAllExtent(placement, arg, kNegativeExtentDirection)
+            return hf.AddDrilledByDistanceExtent(placement, arg, dist, kNegativeExtentDirection)
+
+        extent_str = "through-all" if depth <= 0 else f"{depth}mm deep"
+        try:
+            feature = add(hole_arg, depth / 10.0)
+        except Exception:
+            # some parts (Content Center members) reject plain numbers — values with units work
+            if tapped:
+                raise
+            feature = add(f"{diameter} mm", f"{depth} mm")
+
+        self.active_document().Update()
+        after = self._vol_state()
+        if before and after and after[0] >= before[0] - 1e-3:
+            # the feature exists but cut nothing (e.g. the point is off the body, or the
+            # feature failed) — don't leave it and its sketch behind
+            feature.Delete()
+            try:
+                sketch.Delete()
+            except Exception:
+                pass
+            raise RuntimeError(f"Hole at ({x},{y}) removed no material — the point is sketched on "
+                               "the XY plane and drills into +Z: is it inside the body's outline, "
+                               "with the body on the +Z side? Feature deleted. hole_linear places "
+                               "by a face instead.")
 
         # --- Add position dimensions in a separate sketch (after hole creation) ---
         # HoleFeature placement sketch must have ONLY SketchPoints — construction lines
@@ -830,6 +900,22 @@ class InventorConnection:
                                    kVerticalDim, tg.CreatePoint2d(x_cm + 1.5, y_cm / 2))
 
     # ---------- Diagnostics / token-saving helpers ----------
+
+    @staticmethod
+    def _fresh_mass(doc, comp):
+        """MassProperties recomputed now. An assembly otherwise returns the value cached in
+        the file — stale after its sub-assemblies changed (3607 kg vs 3343 kg seen)."""
+        try:
+            doc.Update()
+        except Exception:
+            pass
+        mp = comp.MassProperties
+        for prop, value in (("CacheResultsOnCompute", False), ("Accuracy", 25603)):  # kHigh
+            try:
+                setattr(mp, prop, value)
+            except Exception:
+                pass
+        return mp
 
     def _vol_state(self):
         """(volume_mm3, faces, edges) of body 1, or None if no body."""
@@ -1626,6 +1712,55 @@ class InventorConnection:
         doc.Activate()
         return f"Assembly created: {doc.DisplayName} (unsaved — use save_document(path))"
 
+    def _placement(self, x=0.0, y=0.0, z=0.0, x_axis=None, y_axis=None):
+        """Matrix putting a component's origin at (x,y,z) mm with its X/Y axes along
+        x_axis/y_axis (Z = X × Y). No axes: no rotation."""
+        tg = self._tg()
+        matrix = tg.CreateMatrix()
+        if x_axis is not None or y_axis is not None:
+            if x_axis is None or y_axis is None:
+                raise ValueError("Give both x_axis and y_axis (or neither).")
+            ax, ay = [float(v) for v in x_axis], [float(v) for v in y_axis]
+            if abs(sum(a * b for a, b in zip(ax, ay))) > 1e-6:
+                raise ValueError(f"x_axis {ax} and y_axis {ay} must be perpendicular.")
+            az = (ax[1]*ay[2] - ax[2]*ay[1], ax[2]*ay[0] - ax[0]*ay[2], ax[0]*ay[1] - ax[1]*ay[0])
+            matrix.SetCoordinateSystem(tg.CreatePoint(x / 10.0, y / 10.0, z / 10.0),
+                                       tg.CreateVector(*ax), tg.CreateVector(*ay), tg.CreateVector(*az))
+        elif x or y or z:
+            matrix.SetTranslation(tg.CreateVector(x / 10.0, y / 10.0, z / 10.0))
+        return matrix
+
+    def place_many(self, items: list[dict]) -> str:
+        """Place many components in one call: [{path, x, y, z, x_axis, y_axis, grounded, name}].
+        x/y/z (or origin=[x,y,z]) in mm. Every entry is checked before anything is placed;
+        a placement that fails is reported and the rest go on."""
+        comp = self.active_assembly()
+        missing = sorted({os.path.abspath(it["path"]) for it in items
+                          if not os.path.exists(os.path.abspath(it.get("path", "")))})
+        if missing:
+            raise RuntimeError("Files not found (nothing placed): " + ", ".join(missing))
+        placed, failed = [], []
+        for n, it in enumerate(items, 1):
+            try:
+                x, y, z = it.get("origin") or (it.get("x", 0), it.get("y", 0), it.get("z", 0))
+                occ = comp.Occurrences.Add(os.path.abspath(it["path"]),
+                                           self._placement(float(x), float(y), float(z),
+                                                           it.get("x_axis"), it.get("y_axis")))
+                if it.get("grounded"):
+                    occ.Grounded = True
+                if it.get("name"):
+                    try:
+                        occ.Name = it["name"]
+                    except Exception:
+                        failed.append(f"#{n} placed as {occ.Name}, name {it['name']!r} taken")
+                placed.append(occ.Name)
+            except Exception as e:
+                failed.append(f"#{n} {os.path.basename(it['path'])}: {e}")
+        msg = f"Placed {len(placed)} of {len(items)} ({comp.Occurrences.Count} occurrences now)"
+        if len(placed) <= 12:
+            msg += f": {', '.join(placed)}"
+        return msg + ("\nProblems:\n  " + "\n  ".join(failed) if failed else "")
+
     def place_component(
         self,
         path: str,
@@ -1648,21 +1783,7 @@ class InventorConnection:
         path = os.path.abspath(path)
         if not os.path.exists(path):
             raise RuntimeError(f"Component file not found: {path}")
-
-        tg = self._tg()
-        matrix = tg.CreateMatrix()
-        if x_axis is not None or y_axis is not None:
-            if x_axis is None or y_axis is None:
-                raise ValueError("Give both x_axis and y_axis (or neither).")
-            ax, ay = [float(v) for v in x_axis], [float(v) for v in y_axis]
-            if abs(sum(a * b for a, b in zip(ax, ay))) > 1e-6:
-                raise ValueError(f"x_axis {ax} and y_axis {ay} must be perpendicular.")
-            az = (ax[1]*ay[2] - ax[2]*ay[1], ax[2]*ay[0] - ax[0]*ay[2], ax[0]*ay[1] - ax[1]*ay[0])
-            matrix.SetCoordinateSystem(tg.CreatePoint(x / 10.0, y / 10.0, z / 10.0),
-                                       tg.CreateVector(*ax), tg.CreateVector(*ay), tg.CreateVector(*az))
-        elif x or y or z:
-            matrix.SetTranslation(tg.CreateVector(x / 10.0, y / 10.0, z / 10.0))
-        occ = comp.Occurrences.Add(path, matrix)
+        occ = comp.Occurrences.Add(path, self._placement(x, y, z, x_axis, y_axis))
         if grounded:
             occ.Grounded = True
 
@@ -1670,6 +1791,97 @@ class InventorConnection:
         state = ", grounded" if grounded else ""
         return (f"Placed '{occ.Name}' at ({x},{y},{z})mm{state} "
                 f"[occurrence {idx} of {comp.Occurrences.Count}]")
+
+    # ---------- Content Center ----------
+    #
+    # Walking the whole Content Center tree takes minutes, so it is navigated by a category
+    # path ("Structural Shapes/Channels") and every node / family found is cached on the
+    # connection — the next call for the same family is instant.
+
+    def _cc_node(self, category: str):
+        cache = self.__dict__.setdefault("_cc_nodes", {})
+        key = "/".join(s.strip() for s in category.split("/") if s.strip())
+        if key in cache:
+            return cache[key]
+        node, walked = self.app.ContentCenter.TreeViewTopNode, []
+        for seg in (key.split("/") if key else []):
+            kids = [node.ChildNodes.Item(i) for i in range(1, node.ChildNodes.Count + 1)]
+            match = next((k for k in kids if k.DisplayName.lower() == seg.lower()), None)
+            if match is None:
+                raise RuntimeError(f"No category {seg!r} under {'/'.join(walked) or 'Content Center'}. "
+                                   f"There: {', '.join(k.DisplayName for k in kids)}")
+            node = match
+            walked.append(match.DisplayName)
+        cache[key] = node
+        return node
+
+    def _cc_family(self, category: str, family: str):
+        cache = self.__dict__.setdefault("_cc_families", {})
+        key = (category.strip("/ ").lower(), family.lower())
+        if key not in cache:
+            node = self._cc_node(category)
+            fams = [node.Families.Item(i) for i in range(1, node.Families.Count + 1)]
+            match = next((f for f in fams if f.DisplayName.lower() == family.lower()), None)
+            if match is None:
+                raise RuntimeError(f"No family {family!r} in {category!r}. "
+                                   f"There: {', '.join(f.DisplayName for f in fams)}")
+            cache[key] = match
+        return cache[key]
+
+    @staticmethod
+    def _cc_columns(fam) -> dict:
+        return {fam.TableColumns.Item(i).InternalName: fam.TableColumns.Item(i)
+                for i in range(1, fam.TableColumns.Count + 1)}
+
+    def content_center(self, category: str = "", family: str = "", size: str = "",
+                       length: float = 0, file_name: str = "") -> str:
+        """Browse the Content Center, or make a member's part file to place.
+
+        No family: lists the sub-categories and families of `category`.
+        Family, no size: lists its sizes. Family + size: creates the part and returns its
+        path. length (mm) makes a custom-length member (structural shapes) saved as
+        file_name (default: <project workspace>/Content Center Custom/<family> <size> L<length>.ipt).
+        """
+        if not family:
+            node = self._cc_node(category)
+            subs = [node.ChildNodes.Item(i).DisplayName for i in range(1, node.ChildNodes.Count + 1)]
+            fams = [node.Families.Item(i).DisplayName for i in range(1, node.Families.Count + 1)]
+            out = [f"{category or 'Content Center'}:"]
+            if subs:
+                out.append("categories: " + ", ".join(subs))
+            if fams:
+                out.append("families: " + ", ".join(fams))
+            return "\n".join(out)
+        fam = self._cc_family(category, family)
+        cols = self._cc_columns(fam)
+        names = [c for c in ("DESIGNATION", "G_D", "SIZE") if c in cols]
+        rows = [fam.TableRows.Item(i) for i in range(1, fam.TableRows.Count + 1)]
+        label = lambda r: str(r.GetCellValue(cols[names[0]])) if names else str(r.Index)
+        if not size:
+            return f"{fam.DisplayName} — {len(rows)} sizes: " + ", ".join(label(r) for r in rows)
+        norm = lambda s: str(s).replace(" ", "").lower()
+        row = next((r for r in rows if any(norm(r.GetCellValue(cols[c])) == norm(size) for c in names)), None)
+        if row is None:
+            raise RuntimeError(f"No size {size!r} in {fam.DisplayName}. Sizes: {', '.join(label(r) for r in rows)}")
+        custom = length > 0
+        if custom and "B_L" not in cols:
+            raise RuntimeError(f"{fam.DisplayName} has no length parameter (B_L) — omit length.")
+        values = self.app.TransientObjects.CreateNameValueMap()
+        if custom:
+            values.Add("B_L", float(length))  # mm
+            if not file_name:
+                ws = self.app.DesignProjectManager.ActiveDesignProject.WorkspacePath
+                safe = "".join(ch for ch in f"{fam.DisplayName} {label(row)} L{length:g}" if ch not in '<>:"/\\|?*')
+                file_name = os.path.join(ws, "Content Center Custom", safe + ".ipt")
+            file_name = os.path.abspath(file_name)
+            os.makedirs(os.path.dirname(file_name), exist_ok=True)
+        result = self._silently(lambda: fam.CreateMember(
+            row, 0, "", 51969, custom, file_name if custom else "", values))  # kUseDefaultRefreshSetting
+        path = next((r for r in (result if isinstance(result, tuple) else (result,))
+                     if isinstance(r, str) and r.lower().endswith(".ipt")), None)
+        if not path or not os.path.exists(path):
+            raise RuntimeError(f"Content Center did not create the part: {result}")
+        return f"{fam.DisplayName} {label(row)}" + (f" L={length:g} mm" if custom else "") + f": {path}"
 
     # ---------- Vendor parts, clearance checks, motion ----------
 
@@ -2001,7 +2213,7 @@ class InventorConnection:
                 "grounded": bool(occ.Grounded),
             })
         try:
-            mp = comp.MassProperties
+            mp = self._fresh_mass(doc, comp)
             info["mass_kg"] = round(mp.Mass, 4)
             info["volume_mm3"] = round(mp.Volume * 1000, 1)
         except Exception:

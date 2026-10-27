@@ -5,10 +5,13 @@ import concurrent.futures
 import functools
 import inspect as _inspect  # `inspect` is a tool name below
 import json
+import linecache
+import math
 import os
 import sys
 import threading
 import time
+import traceback
 from typing import Annotated
 
 import pythoncom
@@ -105,6 +108,8 @@ class _Instance:
         self.output = None              # stdout buffer of the execute_python call in progress
         self.last_call: _Call | None = None
         self.project = ""               # active .ipj when last seen
+        self.libraries: list[str] = []  # load_library files, rerun in a new namespace
+        self.ns_ready = False           # startup file and libraries loaded
         self.lock = threading.Lock()    # two clients' calls arrive on two threads
         self.thread = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"inventor-{name}", initializer=self._init_thread)
@@ -274,29 +279,67 @@ def call_status(instance: Instance = "") -> str:
 
 # ---------- Power tools (token savers) ----------
 
-@tool()
-def execute_python(code: str) -> str:
-    """Execute Python code against the live Inventor connection.
+# Python run by execute_python / load_library. Each run gets its own file name, registered
+# with linecache, so a traceback shows the agent's own lines — also for a helper defined in
+# an earlier call that fails later.
+STARTUP = os.environ.get("INVENTOR_MCP_STARTUP") or os.path.join(
+    os.path.expanduser("~"), ".inventor-mcp", "startup.py")
+_run_count = 0
 
-    Pre-bound objects (re-resolved fresh on every call):
-      inv  — InventorConnection wrapper (all high-level methods, mm units)
-      app  — Inventor.Application COM object
-      doc  — active document          comp — its ComponentDefinition
-      body — comp.SurfaceBodies.Item(1) (or None)
-      tg   — TransientGeometry        math — math module
-    Variables you assign persist between calls until the server restarts or reload_api
-    runs — status shows the namespace's age and names. Each connected Inventor has its
-    own namespace.
-    Internal COM units are CENTIMETERS — divide mm by 10.
-    Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
-    directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
-    Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
-    a dialog. A call longer than the wait limit keeps running; follow it with call_status.
-    Returns captured stdout (print your results!) or the traceback on error.
-    """
-    import io, traceback, math as _math
-    me = _local.instance
-    ctx = {"inv": me.conn, "math": _math}
+
+def _capture(buf):
+    """Send this thread's stdout AND stderr (traceback.print_exc) to buf."""
+    for stream in ("stdout", "stderr"):
+        if not isinstance(getattr(sys, stream), _ThreadStdout):
+            setattr(sys, stream, _ThreadStdout(getattr(sys, stream)))
+        getattr(sys, stream).local.buf = buf
+
+
+def _release():
+    sys.stdout.local.buf = sys.stderr.local.buf = None
+
+
+def _run_source(me, source: str, filename: str | None = None):
+    global _run_count
+    if filename is None:
+        _run_count += 1
+        filename = f"<mcp-{_run_count}>"
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+    exec(compile(source, filename, "exec"), me.ns)
+
+
+def _user_traceback(e: BaseException) -> str:
+    """The traceback from the agent's own code down — not the server's frames above it."""
+    tb = e.__traceback__
+    t = tb
+    while t is not None and not _is_user_file(t.tb_frame.f_code.co_filename):
+        t = t.tb_next
+    return "".join(traceback.format_exception(type(e), e, t or tb))
+
+
+def _is_user_file(name: str) -> bool:
+    return name.startswith("<mcp") or name in _local.instance.libraries or name == STARTUP
+
+
+def _load_libraries(me) -> str:
+    """Run the startup file and load_library files into a fresh namespace."""
+    if me.ns_ready:
+        return ""
+    me.ns_ready = True
+    notes = []
+    for path in ([STARTUP] if os.path.isfile(STARTUP) else []) + me.libraries:
+        try:
+            with open(path, encoding="utf-8") as f:
+                _run_source(me, f.read(), path)
+            notes.append(f"(loaded {os.path.basename(path)})")
+        except Exception as e:
+            notes.append(f"(loading {path} failed:\n{_user_traceback(e)})")
+    return "\n".join(notes)
+
+
+def _bind(me) -> str | None:
+    """Fresh inv/app/doc/comp/body/tg in the namespace. Returns an error to show, if any."""
+    ctx = {"inv": me.conn, "math": math}
     try:
         # only the default reconnects by itself: a named Inventor that was closed must not
         # silently become whichever Inventor Windows hands out first
@@ -317,24 +360,103 @@ def execute_python(code: str) -> str:
     except Exception:
         pass
     me.ns.update(ctx)
+    return None
+
+
+@tool()
+def execute_python(code: str, undo_on_error: bool = False) -> str:
+    """Execute Python code against the live Inventor connection.
+
+    Pre-bound objects (re-resolved fresh on every call):
+      inv  — InventorConnection wrapper (all high-level methods, mm units)
+      app  — Inventor.Application COM object
+      doc  — active document          comp — its ComponentDefinition
+      body — comp.SurfaceBodies.Item(1) (or None)
+      tg   — TransientGeometry        math — math module
+    Variables you assign persist between calls until the server restarts or reload_api
+    runs — status shows the namespace's age and names. Each connected Inventor has its
+    own namespace. Helpers you need every time: put them in a file and load_library it
+    (or in ~/.inventor-mcp/startup.py) — they come back by themselves in a new namespace.
+    Internal COM units are CENTIMETERS — divide mm by 10.
+    Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
+    directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
+    Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
+    a dialog. A call longer than the wait limit keeps running; follow it with call_status.
+    Returns captured stdout + stderr (print your results!), or the traceback from your
+    own code down on error.
+
+    Args:
+        code: Python source.
+        undo_on_error: Run inside one undo transaction on the active document and roll
+            it back if the code raises — no half-built sketches or work planes left behind.
+    """
+    import io
+    me = _local.instance
+    error = _bind(me)
+    if error:
+        return error
     buf = me.output = io.StringIO()
-    if not isinstance(sys.stdout, _ThreadStdout):
-        sys.stdout = _ThreadStdout(sys.stdout)
-    sys.stdout.local.buf = buf
+    _capture(buf)
+    txn = None
     try:
+        notes = _load_libraries(me)
+        if notes:
+            print(notes)
+        if undo_on_error and me.ns.get("doc") is not None:
+            txn = inv.app.TransactionManager.StartTransaction(me.ns["doc"], "MCP execute_python")
         try:
-            # silent again in case this call connected first (the thread found no app)
-            inv._silently(lambda: exec(compile(code, "<mcp>", "exec"), me.ns))
-        finally:
-            sys.stdout.local.buf = None
+            inv._silently(lambda: _run_source(me, code))
+        except Exception as e:
+            if txn is not None:
+                txn.Abort()
+                txn = None
+                print("(undo_on_error: every change of this call was rolled back)", file=sys.stderr)
+            partial = buf.getvalue().strip()
+            return (partial + "\n" if partial else "") + "ERROR:\n" + _user_traceback(e)
+        if txn is not None:
+            txn.End()
         out = buf.getvalue().strip()
         if len(out) > 6000:
             out = out[:6000] + "\n... (truncated at 6000 chars)"
         return out if out else "(ok, no output)"
-    except Exception:
-        partial = buf.getvalue().strip()
-        tb = traceback.format_exc(limit=3)
-        return (partial + "\n" if partial else "") + f"ERROR:\n{tb}"
+    finally:
+        _release()
+
+
+@tool()
+def load_library(path: str) -> str:
+    """Run a Python file into this Inventor's execute_python namespace and keep it there:
+    after reload_api or a new namespace it is loaded again by itself. For helper functions
+    and cached objects (Content Center families…) you would otherwise redefine every time.
+    A file at ~/.inventor-mcp/startup.py (or INVENTOR_MCP_STARTUP) is loaded the same way
+    for every Inventor."""
+    import io
+    me = _local.instance
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        return f"File not found: {path}"
+    error = _bind(me)
+    if error:
+        return error
+    before = set(me.ns)
+    buf = me.output = io.StringIO()
+    _capture(buf)
+    try:
+        _load_libraries(me)
+        if path not in me.libraries:
+            me.libraries.append(path)
+        try:
+            with open(path, encoding="utf-8") as f:
+                source = f.read()
+            inv._silently(lambda: _run_source(me, source, path))
+        except Exception as e:
+            me.libraries.remove(path)
+            return buf.getvalue() + "ERROR:\n" + _user_traceback(e)
+    finally:
+        _release()
+    new = sorted(k for k in set(me.ns) - before if not k.startswith("__"))
+    out = buf.getvalue().strip()
+    return (out + "\n" if out else "") + f"Loaded {os.path.basename(path)}: {', '.join(new) or 'no new names'}"
 
 
 @tool()
@@ -350,6 +472,7 @@ def reload_api() -> str:
     me = _local.instance
     me.ns.clear()
     me.ns_created = time.time()
+    me.ns_ready = False  # startup file and load_library files run again
     return "inventor_api.py reloaded (connections preserved)"
 
 
@@ -541,7 +664,12 @@ def status() -> str:
     info["python_namespace"] = {
         "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(me.ns_created)),
         "names": defined,
+        "libraries": [os.path.basename(p) for p in
+                      ([STARTUP] if os.path.isfile(STARTUP) else []) + me.libraries],
     }
+    unsaved = inv.unsaved_documents()
+    if unsaved:
+        info["never_saved_documents"] = unsaved + ["(close_unsaved closes the ones nothing references)"]
     return json.dumps(info, indent=2, ensure_ascii=False)
 
 
@@ -559,15 +687,29 @@ def create_part(name: str = "", template: str = "metric") -> str:
 
 
 @tool()
-def save_document(path: str = "") -> str:
+def save_document(path: str = "", overwrite: bool = False) -> str:
     """Save the active document — never opens a dialog. Saving in place also saves
     dependents that changed (e.g. sub-assemblies), which would otherwise trigger
     Inventor's modal 'save dependents?' prompt and block until a user clicks OK.
+    The path is checked first (characters, extension, an existing file) so a bad one
+    gets a clear message instead of Inventor's E_INVALIDARG.
 
     Args:
         path: Full file path to save as (e.g. "D:/parts/flange.ipt"). If empty, saves in place.
+        overwrite: Replace a file that already exists at path (not one open in Inventor).
     """
-    return inv.save_document(path or None)
+    return inv.save_document(path or None, overwrite)
+
+
+@tool()
+def close_unsaved(include_active: bool = False) -> str:
+    """Close documents that were never saved (Part12, Assembly3… left by failed attempts)
+    without saving. Ones another open document references are kept.
+
+    Args:
+        include_active: Close the active document too if it was never saved.
+    """
+    return inv.close_unsaved(include_active)
 
 
 @tool()
@@ -1106,6 +1248,45 @@ def place_component(
     xa = tuple(float(v) for v in x_axis.split(",")) if x_axis.strip() else None
     ya = tuple(float(v) for v in y_axis.split(",")) if y_axis.strip() else None
     return inv.place_component(path, x, y, z, grounded, x_axis=xa, y_axis=ya)
+
+
+@tool()
+def content_center(category: str = "", family: str = "", size: str = "",
+                   length: float = 0, file_name: str = "") -> str:
+    """Browse the Content Center and make member parts to place (place_component / place_many).
+
+    Step by step — each call is quick (the whole tree takes minutes to walk, so give a path):
+      content_center()                                         → top categories
+      content_center("Structural Shapes")                      → sub-categories
+      content_center("Structural Shapes/Channels")             → families
+      content_center("Structural Shapes/Channels", "DIN 1026-1")          → sizes
+      content_center("Structural Shapes/Channels", "DIN 1026-1", "U 100", length=1500)
+                                                               → part file path
+
+    Args:
+        category: Category path, "/"-separated, as listed.
+        family: Family name, as listed.
+        size: Size designation as listed (spaces and case ignored).
+        length: mm — a custom-length member (structural shapes). 0 = standard member.
+        file_name: Where a custom member is saved (default: project workspace /
+                   Content Center Custom/<family> <size> L<length>.ipt).
+    """
+    return inv.content_center(category, family, size, length, file_name)
+
+
+@tool()
+def place_many(components: list[dict]) -> str:
+    """Place many parts / sub-assemblies into the active assembly in one call — for frames
+    of dozens or hundreds of members, where place_component one by one is slow.
+
+    Args:
+        components: [{"path": "C:/.../beam.ipt", "x": 0, "y": 0, "z": 0,
+                      "x_axis": [1,0,0], "y_axis": [0,1,0], "grounded": false,
+                      "name": "Beam_A1"}, ...]. mm. "origin": [x,y,z] works too. Axes and
+                      name are optional (axes: where the part's own X/Y point; give both).
+                      Files must exist — all are checked before anything is placed.
+    """
+    return inv.place_many(components)
 
 
 @tool()

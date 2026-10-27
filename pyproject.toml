@@ -1,6 +1,6 @@
 [project]
 name = "inventor-mcp-server"
-version = "0.5.0"
+version = "0.5.1"
 description = "MCP server for parametric 3D modeling in Autodesk Inventor (parts, sheet metal, assemblies)"
 readme = "README.md"
 license = "MIT"

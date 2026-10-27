@@ -110,6 +110,23 @@ moves up in the ROT.
 `DesignProject.Activate(False)` switches the project for this session only — the default project of
 the next Inventor start stays as it was. Inventor refuses to switch while any document is open.
 
+## Content Center
+
+- `app.ContentCenter` raises E_FAIL until `app.Ready` is True — wait after starting Inventor.
+- Walking the whole tree (`TreeViewTopNode` → `ChildNodes` / `Families`) takes minutes. Navigate by
+  `DisplayName` path ("Structural Shapes/Channels") and cache the nodes; listing one node's 24
+  families takes ~3 s.
+- Columns: `DESIGNATION` / `G_D` / `SIZE` name the size, `B_L` is the length of structural shapes.
+  Cell values come back as locale strings ("10,6").
+- Custom length: `ContentFamily.CreateMember(row, 0, "", 51969, True, full_path, NameValueMap{"B_L": mm})`
+  (51969 = kUseDefaultRefreshSetting); the length is in mm. Returns the file path.
+
+## Processes left behind
+
+An Inventor started with `DispatchEx` keeps running after the client process exits. After
+`Quit()`, release the reference and wait a few seconds before exiting — a client that exits right
+after `Quit()` can leave a windowless `Inventor.exe` behind, which no client can reach again.
+
 ## Chamfer — API changed in 2026
 
 `CreateChamferDefinition()` was **removed**. Use:
