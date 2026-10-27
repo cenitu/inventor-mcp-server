@@ -479,7 +479,8 @@ def reload_api() -> str:
 
 @tool()
 def view_image(views: str = "iso", width: int = 800, height: int = 600,
-               background: str = "inventor", focus: str = "", sketches: bool = False):
+               background: str = "inventor", focus: str = "", sketches: bool = False,
+               up: str = "y"):
     """Look at the model: pictures of the active document, returned as images you can see.
     Use it to check your work — a flange on the wrong side, a door opening the wrong way,
     a part floating off the frame — which the numbers alone don't show.
@@ -491,9 +492,11 @@ def view_image(views: str = "iso", width: int = 800, height: int = 600,
         background: "inventor" (its gradient) or "white".
         focus: Assembly component name — zoom to it, keeping each view's direction.
         sketches: Show sketches and work features too (hidden by default; restored after).
+        up: "y" = Inventor's own view names (its default templates have Y up); "z" for a
+            model built with Z up (frames, buildings): front looks along +Y, top down -Z.
     """
     names = [v.strip().lower() for v in views.split(",") if v.strip()]
-    paths = inv.view_images(names, width, height, background.lower() == "white", focus, sketches)
+    paths = inv.view_images(names, width, height, background.lower() == "white", focus, sketches, up)
     images = []
     for path in paths:
         with open(path, "rb") as f:
@@ -1365,6 +1368,28 @@ def content_center(category: str = "", family: str = "", size: str = "",
                    Content Center Custom/<family> <size> L<length>.ipt).
     """
     return inv.content_center(category, family, size, length, file_name)
+
+
+@tool()
+def frame_members(members: list[dict], category: str = "", family: str = "", size: str = "",
+                  folder: str = "") -> str:
+    """Build a steel frame: structural profiles laid along skeleton lines in the active
+    assembly — what Frame Generator does (it has no API). Each member is a Content Center
+    custom-length part (one file per profile and length, reused), turned so its length runs
+    from start to end. Returns the placements and a saw cut list. Check with view_image.
+
+    Args:
+        members: [{"start": [0,0,0], "end": [0,0,2000], "name": "Post_1"}, ...] in mm. Per
+            member, optional: "family", "size", "category" (override the call's), "roll"
+            (degrees, turns the section about its line), "anchor" ("center" = the section's
+            middle on the line, default; "origin" = the profile's own origin), "extend"
+            ([at start, at end] mm, negative to shorten — e.g. to stop at a crossing member).
+            Horizontal members keep their section level; roll 90 turns a U to face sideways.
+        category, family, size: Default profile, as content_center lists them, e.g.
+            "Structural Shapes/Channels", "DIN 1026-1", "U 100".
+        folder: Where the member files go (default: project workspace /Content Center Custom).
+    """
+    return inv.frame_members(members, folder, category, family, size)
 
 
 @tool()
