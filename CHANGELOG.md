@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- **Arcs in sketches.** Agents had no way to draw an arc, so round corners and holes came out as
+  many short lines (faceted parts). Now:
+  - `draw_closed_profile` takes rounded corners `[x, y, r]` (tangent arcs, lines trimmed, tangent
+    constraints) and arcs through a point `{"through": [x, y]}`;
+  - `draw_rectangle(corner_radius=…)`, `draw_slot`, `draw_arc` (through a point, or around a center);
+  - `project_edges` — exact edges of a face / body in the sketch, for remodelling;
+  - every arc goes through three points, so a sketch on a face whose axes are flipped can't mirror it
+    (the counter-clockwise flag of `AddByCenterStartEndPoint` did);
+  - `inspect` warns when a body has many shallow kinks between straight edges — a curve drawn as lines.
 - **`call_status(wait_seconds=…)`** — waits up to 45 s (never past the call timeout) for the running
   call and returns its result as soon as it finishes, instead of agents polling it 20+ times per long
   job. The wait runs in a worker thread, so the server keeps answering other agents meanwhile.

@@ -40,7 +40,7 @@ Feature tools (extrude, hole, flange, ...) return an auto-report suffix like
 | Feature indices | 1-based, in creation order (`list_features()` to see them) |
 | Edge indices | 1-based, in Inventor's internal order — **change after every feature that adds/removes edges** |
 
-## The five rules that prevent 80% of failures
+## The six rules that prevent 80% of failures
 
 These come from real failures in past sessions. Internalize them.
 
@@ -92,6 +92,25 @@ python -X utf8 my_script.py    # required if script prints Cyrillic / × symbols
 ```
 
 Saving over an open .ipt fails with `E_INVALIDARG (-2147024809)`. Either delete first, or use a fresh filename (`HexNut_M16_v2.ipt`).
+
+### 6. Curves are arcs — never many short lines
+
+A round corner or a hole drawn as a polyline makes a faceted part: wrong flat patterns, ugly
+drawings, no concentric constraints, and `inspect` warns about it. Use real arcs:
+
+```python
+inv.draw_rectangle(0, 0, 200, 100, corner_radius=15)                  # plate with R15 corners
+inv.draw_closed_profile([[0,0,10], [120,0,10], [120,60], [0,60]])     # [x, y, r] = rounded corner
+inv.draw_closed_profile([[0,-50], [0,50], {"through": [50,0]}])       # arc through a point
+inv.draw_slot(x=40, y=20, length=60, width=16, angle=30)              # oblong hole
+inv.draw_arc(30, 0, 0, 30, cx=0, cy=0)                                 # open arc around a center
+inv.project_edges(face_index=7)    # remodelling: copy a face's exact edges into the sketch
+```
+
+Arcs are drawn through three points, so a sketch on a face whose axes are flipped can't mirror
+them. In `execute_python`: `SketchArcs.AddByThreePoints`, `SketchArcs.AddByFillet`,
+`SketchCircles.AddByCenterRadius`; to rebuild from a reference body read each edge's
+`GeometryType` (5124 circle, 5125 arc) instead of sampling it with `GetStrokes`.
 
 ## Common workflows — cookbook
 

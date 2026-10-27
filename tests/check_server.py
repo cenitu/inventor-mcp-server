@@ -320,6 +320,29 @@ blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", 
 kinds = [getattr(b, "type", None) for b in blocks]
 check("view_image reaches the client as images", kinds == ["image", "image"], str(kinds))
 
+print("Profiles with arcs (no Inventor needed):")
+import math
+api_mod = importlib.import_module("inventor_mcp_server.inventor_api")
+segs = api_mod.profile_segments([[0, 0, 10], [200, 0, 10], [200, 100, 10], [0, 100, 10]])
+lines = [s for s in segs if s[0] == "line"]
+arcs = [s for s in segs if s[0] == "fillet"]
+check("rounded rectangle: 4 trimmed lines and 4 arcs",
+      len(lines) == 4 and len(arcs) == 4 and all(abs(a - b) < 1e-9 for a, b in zip(
+          lines[0][1] + lines[0][2], (10, 0, 190, 0))), str(lines[0]))
+mid = arcs[0][2]  # corner (200, 0): center (190, 10), the middle 10 mm from it towards the corner
+check("…each arc's middle lies on the radius",
+      abs(math.hypot(mid[0] - 190, mid[1] - 10) - 10) < 1e-9 and mid[0] > 190 and mid[1] < 10, str(mid))
+segs = api_mod.profile_segments([[0, -50], [0, 50], {"through": [50, 0]}])
+check("a D shape: a line and the closing arc", [s[0] for s in segs] == ["line", "arc"]
+      and segs[1][1:] == ((0.0, 50.0), (50.0, 0.0), (0.0, -50.0)), str(segs))
+for bad, why in (([[0, 0, 60], [100, 0, 60], [100, 100], [0, 100]], "don't fit"),
+                 ([[0, 0], [10, 0, 2], {"through": [15, 5]}, [10, 10]], "straight lines on both sides")):
+    try:
+        api_mod.profile_segments(bad)
+        check(f"refused: {why}", False)
+    except ValueError as e:
+        check(f"refused: {why}", why in str(e), str(e))
+
 print("Keeper (no Inventor needed):")
 keeper_mod = importlib.import_module("inventor_mcp_server.keeper")
 k = keeper_mod.Keeper()

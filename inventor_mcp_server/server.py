@@ -1070,6 +1070,7 @@ def draw_rectangle(
     x: float = 0, y: float = 0,
     width: float = 100, height: float = 50,
     sketch_index: int = 0,
+    corner_radius: float = 0,
 ) -> str:
     """Draw a centered rectangle in a sketch. Dimensions in mm.
 
@@ -1079,9 +1080,10 @@ def draw_rectangle(
         width: Width in mm.
         height: Height in mm.
         sketch_index: Sketch number (0 = latest sketch).
+        corner_radius: Round all four corners with real arcs (half the short side = a slot).
     """
     idx = sketch_index if sketch_index > 0 else None
-    return inv.draw_rectangle(x, y, width, height, idx)
+    return inv.draw_rectangle(x, y, width, height, idx, corner_radius)
 
 
 @tool()
@@ -1148,20 +1150,79 @@ def draw_polygon(
 
 @tool()
 def draw_closed_profile(
-    points: str,
+    points: str | list,
     sketch_index: int = 0,
 ) -> str:
-    """Draw a closed profile (polygon) from connected points. All coordinates in mm.
-    Lines share endpoints so Inventor recognizes the closed loop for extrude/revolve.
+    """Draw a closed profile of lines AND arcs. All coordinates in mm. Segments share their
+    end points, so Inventor sees one closed loop for extrude/revolve. Never approximate a
+    curve with many short lines — round corners and arcs are built in:
+
+      [x, y]              a corner
+      [x, y, r]           a corner rounded with radius r (tangent arc, lines trimmed)
+      {"through": [x, y]} the segment from the corner before to the corner after is an
+                          arc through this point (after the last corner: the closing one)
+
+    Examples: plate with R10 corners "[[0,0,10],[200,0,10],[200,100,10],[0,100,10]]";
+    a D shape "[[0,-50],[0,50],{"through":[50,0]}]". Arcs go through three points, so the
+    sketch's axis directions can't flip them.
 
     Args:
-        points: JSON array of [x,y] pairs in mm. Example: "[[0,0],[50,0],[25,40]]" for a triangle.
+        points: JSON array (or list) of the entries above.
         sketch_index: Sketch number (0 = latest sketch).
     """
     import json as _json
-    pts = _json.loads(points)
+    pts = _json.loads(points) if isinstance(points, str) else points
     idx = sketch_index if sketch_index > 0 else None
     return inv.draw_closed_profile(pts, idx)
+
+
+@tool()
+def draw_arc(x1: float, y1: float, x2: float, y2: float,
+             xm: float | None = None, ym: float | None = None,
+             cx: float | None = None, cy: float | None = None,
+             sketch_index: int = 0) -> str:
+    """Draw an open arc from (x1, y1) to (x2, y2) in mm — e.g. to close a profile drawn with
+    draw_line. Either through a point on it (xm, ym), or around its center (cx, cy) running
+    counter-clockwise in sketch coordinates. For closed shapes prefer draw_closed_profile.
+
+    Args:
+        x1, y1, x2, y2: Start and end.
+        xm, ym: A point on the arc between them.
+        cx, cy: The center (start and end must be equally far from it).
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return inv.draw_arc(x1, y1, x2, y2, xm, ym, cx, cy, sketch_index if sketch_index > 0 else None)
+
+
+@tool()
+def draw_slot(x: float, y: float, length: float, width: float, angle: float = 0,
+              sketch_index: int = 0) -> str:
+    """Draw a slot (oblong hole / rounded-end profile) centered on (x, y), mm.
+
+    Args:
+        x, y: Center.
+        length: Overall length, end to end.
+        width: Width (= the end radius x 2).
+        angle: Direction of the length in degrees, in sketch coordinates.
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return inv.draw_slot(x, y, length, width, angle, sketch_index if sketch_index > 0 else None)
+
+
+@tool()
+def project_edges(face_index: int = 0, edge_indices: str = "", body_index: int = 1,
+                  sketch_index: int = 0) -> str:
+    """Project a body's edges onto the sketch — exact lines, arcs, circles and splines,
+    linked to the model. Use it to build on existing or reference geometry (e.g. remodelling
+    an imported part) instead of re-tracing curves point by point.
+
+    Args:
+        face_index: Project every edge of this face of the body (list_faces).
+        edge_indices: Or these edges, "3,7,8" (list_edges).
+        body_index: Body in a multi-body part (1 = first).
+        sketch_index: Sketch number (0 = latest sketch).
+    """
+    return inv.project_edges(face_index, edge_indices, body_index, sketch_index if sketch_index > 0 else None)
 
 
 # ---------- Features ----------
