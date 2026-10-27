@@ -159,6 +159,18 @@ and its commands (`AFG_CMD_InsertProfile`, `AFG_Mitrecut_Profiles`, …) need in
 found from its range box (the axis whose extent equals the length); its section center from the
 other two.
 
+## Sketch arcs
+
+- `SketchArcs.AddByThreePoints(start, mid, end)` takes SketchPoints for start and end, so a chain of
+  lines and arcs can share its points (one closed loop). Inventor stores arcs counter-clockwise: a
+  clockwise three-point arc comes back with start and end swapped — match the next segment to the end
+  point nearest the intended one.
+- `AddByCenterStartEndPoint`'s counter-clockwise flag is read in sketch space; on a face sketch with
+  flipped axes the arc came out mirrored (a thin strip instead of an oval). Three points avoid it.
+- A tangent constraint between a line and an arc that isn't tangent makes the solver bend the
+  geometry — a D shape (line + arc through a point) collapsed to a single point. Constrain only
+  rounded corners.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,

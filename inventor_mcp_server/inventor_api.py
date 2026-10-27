@@ -275,6 +275,76 @@ def inventor_pids() -> list[int]:
     return [int(row.split('","')[1]) for row in out.splitlines() if row.startswith('"Inventor.exe"')]
 
 
+def profile_segments(entries) -> list[tuple]:
+    """A closed profile as ("line", p0, p1) / ("arc" | "fillet", p0, through, p1) segments,
+    in mm — "fillet" is a rounded corner, tangent to its two lines.
+
+    entries: [x, y] a corner; [x, y, r] a corner rounded with radius r (a tangent arc
+    between its two straight neighbours); {"through": [x, y]} makes the segment from the
+    corner before it to the corner after it an arc through that point (after the last
+    corner: the closing segment). Pure geometry — no Inventor needed.
+    """
+    import math
+    corners, through = [], {}
+    for e in entries:
+        if isinstance(e, dict):
+            if "through" not in e or not corners:
+                raise ValueError(f"{e!r}: an arc entry is {{\"through\": [x, y]}}, after a corner")
+            through[len(corners) - 1] = tuple(float(v) for v in e["through"][:2])
+        else:
+            if len(e) not in (2, 3):
+                raise ValueError(f"{e!r}: a corner is [x, y] or [x, y, radius]")
+            corners.append((float(e[0]), float(e[1]), float(e[2]) if len(e) == 3 else 0.0))
+    n = len(corners)
+    if n < 2 or (n == 2 and not through):
+        raise ValueError("A closed profile needs at least 3 corners (or 2 joined by an arc)")
+
+    def unit(a, b):
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d < 1e-9:
+            raise ValueError(f"Two corners at the same point {a}")
+        return ((b[0] - a[0]) / d, (b[1] - a[1]) / d), d
+
+    # rounded corners: where each one trims its two lines, and the arc's middle point
+    trim_in, trim_out, mid = {}, {}, {}
+    for i, (x, y, r) in enumerate(corners):
+        if r <= 0:
+            continue
+        if (i - 1) % n in through or i in through:
+            raise ValueError(f"Corner {i + 1} ({x}, {y}): a radius needs straight lines on both sides")
+        p = (x, y)
+        u1, _ = unit(p, corners[(i - 1) % n][:2])
+        u2, _ = unit(p, corners[(i + 1) % n][:2])
+        phi = math.acos(max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1])))
+        if phi < 1e-6 or abs(phi - math.pi) < 1e-6:
+            raise ValueError(f"Corner {i + 1} ({x}, {y}) is straight — nothing to round")
+        t = r / math.tan(phi / 2)
+        trim_in[i] = (p[0] + u1[0] * t, p[1] + u1[1] * t)
+        trim_out[i] = (p[0] + u2[0] * t, p[1] + u2[1] * t)
+        b, _ = unit((0.0, 0.0), (u1[0] + u2[0], u1[1] + u2[1]))
+        c = r / math.sin(phi / 2)
+        mid[i] = (p[0] + b[0] * (c - r), p[1] + b[1] * (c - r))
+
+    segs = []
+    for i in range(n):
+        j = (i + 1) % n
+        a = trim_out.get(i, corners[i][:2])
+        b = trim_in.get(j, corners[j][:2])
+        if i in through:
+            segs.append(("arc", a, through[i], b))
+        else:
+            length = math.hypot(b[0] - a[0], b[1] - a[1])
+            full = math.hypot(corners[j][0] - corners[i][0], corners[j][1] - corners[i][1])
+            if (i in trim_out or j in trim_in) and (length < 1e-6 or
+                    (b[0] - a[0]) * (corners[j][0] - corners[i][0]) + (b[1] - a[1]) * (corners[j][1] - corners[i][1]) <= 0):
+                raise ValueError(f"The radii at corners {i + 1} and {j + 1} don't fit on a {full:g} mm side")
+            if length > 1e-6:
+                segs.append(("line", a, b))
+        if j in mid:
+            segs.append(("fillet", trim_in[j], mid[j], trim_out[j]))
+    return segs
+
+
 class InventorConnection:
     def __init__(self):
         self._app = None
@@ -776,7 +846,18 @@ class InventorConnection:
         x: float = 0, y: float = 0,
         width: float = 100, height: float = 50,
         sketch_index: int | None = None,
+        corner_radius: float = 0,
     ) -> str:
+        if corner_radius > 0:
+            if corner_radius * 2 > min(width, height) + 1e-9:
+                raise ValueError(f"corner_radius {corner_radius} is more than half of {min(width, height)}")
+            w, h, r = width / 2, height / 2, corner_radius
+            corners = [[x - w, y - h, r], [x + w, y - h, r], [x + w, y + h, r], [x - w, y + h, r]]
+            if abs(corner_radius * 2 - min(width, height)) < 1e-9:
+                return self.draw_slot(x, y, max(width, height), min(width, height),
+                                      0 if width >= height else 90, sketch_index)
+            self.draw_closed_profile(corners, sketch_index)
+            return f"Rectangle {width}x{height}mm R{corner_radius} at ({x},{y})"
         sketch = self._get_sketch(sketch_index)
         tg = self._tg()
         # All dimensions in cm (Inventor internal units)
@@ -876,36 +957,159 @@ class InventorConnection:
 
     def draw_closed_profile(
         self,
-        points: list[list[float]],
+        points: list,
         sketch_index: int | None = None,
     ) -> str:
-        """Draw a closed profile from a list of [x,y] points (mm).
-        Lines share endpoints for proper profile recognition by Inventor."""
+        """Draw a closed profile: corners [x, y], rounded corners [x, y, r], arcs
+        {"through": [x, y]} between corners (see profile_segments). mm. Segments share
+        their end points, so Inventor sees one closed loop for extrude/revolve. Arcs are
+        drawn through three points — no clockwise/counter-clockwise flag to get wrong on a
+        sketch whose axes are flipped."""
+        segs = profile_segments(points)
+        sketch = self._get_sketch(sketch_index)
+        arcs = self._draw_segments(sketch, segs)
+        lines = len(segs) - arcs
+        return f"Closed profile: {lines} line(s), {arcs} arc(s)"
+
+    def _draw_segments(self, sketch, segs) -> int:
+        """Draw a closed chain of segments (mm), each starting on the previous one's end
+        point and the last one ending on the first one's start. Returns the arc count."""
+        tg = self._tg()
+        pt = lambda p: tg.CreatePoint2d(p[0] / 10.0, p[1] / 10.0)
+
+        def nearest(entity, p):  # an arc's start and end may come out swapped
+            a, b = entity.StartSketchPoint, entity.EndSketchPoint
+            da = (a.Geometry.X * 10 - p[0]) ** 2 + (a.Geometry.Y * 10 - p[1]) ** 2
+            db = (b.Geometry.X * 10 - p[0]) ** 2 + (b.Geometry.Y * 10 - p[1]) ** 2
+            return a if da <= db else b
+
+        first = cur = None
+        prev = None
+        arcs = 0
+        for k, seg in enumerate(segs):
+            start = cur if cur is not None else pt(seg[1])
+            end = first if k == len(segs) - 1 else pt(seg[-1])
+            if seg[0] == "line":
+                ent = sketch.SketchLines.AddByTwoPoints(start, end)
+            else:  # arc or fillet
+                ent = sketch.SketchArcs.AddByThreePoints(start, pt(seg[2]), end)
+                arcs += 1
+            if first is None:
+                first = nearest(ent, seg[1])
+            cur = nearest(ent, seg[-1])
+            if prev is not None and "fillet" in (prev[0], seg[0]) and "line" in (prev[0], seg[0]):
+                # rounded corners stay tangent when the sketch is edited later. Only those:
+                # the solver would bend an arc "through" a point to make it tangent — a
+                # D shape collapsed to a point that way
+                try:
+                    sketch.GeometricConstraints.AddTangent(prev[1], ent)
+                except Exception:
+                    pass
+            prev = (seg[0], ent)
+        return arcs
+
+    def draw_arc(self, x1: float, y1: float, x2: float, y2: float,
+                 xm: float | None = None, ym: float | None = None,
+                 cx: float | None = None, cy: float | None = None,
+                 sketch_index: int | None = None) -> str:
+        """An open arc from (x1, y1) to (x2, y2), mm: through (xm, ym), or around the
+        center (cx, cy) counter-clockwise in sketch coordinates (start and end must be
+        equally far from it)."""
+        import math
+        if xm is None or ym is None:
+            if cx is None or cy is None:
+                raise ValueError("Give a point on the arc (xm, ym) or its center (cx, cy)")
+            r1, r2 = math.hypot(x1 - cx, y1 - cy), math.hypot(x2 - cx, y2 - cy)
+            if abs(r1 - r2) > 0.01:
+                raise ValueError(f"Start and end are {r1:.3f} and {r2:.3f} mm from the center — not one circle")
+            a1 = math.atan2(y1 - cy, x1 - cx)
+            a2 = math.atan2(y2 - cy, x2 - cx)
+            sweep = (a2 - a1) % (2 * math.pi) or 2 * math.pi
+            am = a1 + sweep / 2
+            xm, ym = cx + r1 * math.cos(am), cy + r1 * math.sin(am)
         sketch = self._get_sketch(sketch_index)
         tg = self._tg()
+        arc = sketch.SketchArcs.AddByThreePoints(tg.CreatePoint2d(x1 / 10, y1 / 10),
+                                                 tg.CreatePoint2d(xm / 10, ym / 10),
+                                                 tg.CreatePoint2d(x2 / 10, y2 / 10))
+        return (f"Arc R{arc.Radius * 10:.3f} from ({x1},{y1}) to ({x2},{y2}), "
+                f"center ({arc.CenterSketchPoint.Geometry.X * 10:.3f}, {arc.CenterSketchPoint.Geometry.Y * 10:.3f})")
 
-        if len(points) < 3:
-            raise ValueError("Need at least 3 points for a closed profile")
+    def draw_slot(self, x: float, y: float, length: float, width: float, angle: float = 0,
+                  sketch_index: int | None = None) -> str:
+        """A slot (two straight sides, round ends) centered on (x, y): overall length and
+        width in mm, turned by angle degrees in the sketch."""
+        import math
+        if length <= width:
+            raise ValueError("A slot is longer than it is wide — use draw_circle for length == width")
+        a = math.radians(angle)
+        d = (math.cos(a), math.sin(a))          # along the slot
+        n = (-d[1], d[0])                       # across it
+        h, r = (length - width) / 2, width / 2
+        p = lambda s, t: [x + d[0] * s + n[0] * t, y + d[1] * s + n[1] * t]
+        self.draw_closed_profile([p(-h, r), p(h, r), {"through": p(h + r, 0)},
+                                  p(h, -r), p(-h, -r), {"through": p(-h - r, 0)}], sketch_index)
+        return f"Slot {length}x{width}mm at ({x},{y}), {angle}°"
 
-        # First line
-        pt1 = tg.CreatePoint2d(points[0][0] / 10.0, points[0][1] / 10.0)
-        pt2 = tg.CreatePoint2d(points[1][0] / 10.0, points[1][1] / 10.0)
-        first_line = sketch.SketchLines.AddByTwoPoints(pt1, pt2)
+    def project_edges(self, face_index: int = 0, edge_indices: str = "", body_index: int = 1,
+                      sketch_index: int | None = None) -> str:
+        """Project edges of a body onto the sketch — exact lines, arcs, circles and splines,
+        linked to the model. face_index: all edges of that face; edge_indices: "3,7,8"."""
+        sketch = self._get_sketch(sketch_index)
+        body = self.active_part().SurfaceBodies.Item(body_index)
+        if face_index:
+            edges = body.Faces.Item(face_index).Edges
+            edges = [edges.Item(i) for i in range(1, edges.Count + 1)]
+        elif edge_indices:
+            edges = [body.Edges.Item(int(s)) for s in edge_indices.replace(" ", "").split(",") if s]
+        else:
+            raise ValueError("Give face_index or edge_indices (list_faces / list_edges show them)")
+        kinds = {}
+        for e in edges:
+            kind = self._curve_kind(sketch.AddByProjectingEntity(e))
+            kinds[kind] = kinds.get(kind, 0) + 1
+        return f"Projected {len(edges)} edge(s): " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
 
-        # Subsequent lines — connect to previous endpoint
-        prev_line = first_line
-        for i in range(2, len(points)):
-            next_pt = tg.CreatePoint2d(points[i][0] / 10.0, points[i][1] / 10.0)
-            prev_line = sketch.SketchLines.AddByTwoPoints(
-                prev_line.EndSketchPoint, next_pt
-            )
+    @staticmethod
+    def _curve_kind(entity) -> str:
+        """line / arc / circle / curve for a sketch entity, by the properties it has."""
+        for prop, kind in (("SweepAngle", "arc"), ("Radius", "circle")):
+            try:
+                getattr(entity, prop)
+                return kind
+            except Exception:
+                pass
+        try:
+            entity.Geometry.Direction
+            return "line"
+        except Exception:
+            return "curve"
 
-        # Close the loop — connect last endpoint to first startpoint
-        sketch.SketchLines.AddByTwoPoints(
-            prev_line.EndSketchPoint, first_line.StartSketchPoint
-        )
+    def faceting(self, body) -> int:
+        """How many vertices join two straight edges at a shallow angle (under 20°) — the
+        trace of a curve drawn as many short lines. A designed part has almost none."""
+        import math
+        ends = {}
+        for i in range(1, body.Edges.Count + 1):
+            e = body.Edges.Item(i)
+            if e.GeometryType != 5123:  # kLineSegmentCurve
+                continue
+            a, b = e.StartVertex.Point, e.StopVertex.Point
+            pa, pb = (a.X, a.Y, a.Z), (b.X, b.Y, b.Z)
+            for p, q in ((pa, pb), (pb, pa)):
+                ends.setdefault(tuple(round(v, 5) for v in p), []).append((q[0] - p[0], q[1] - p[1], q[2] - p[2]))
+        def turn(u, v):  # degrees the outline turns at the vertex: 0 = straight on
+            nu, nv = math.sqrt(sum(c * c for c in u)), math.sqrt(sum(c * c for c in v))
+            if nu < 1e-9 or nv < 1e-9:
+                return 90.0
+            return 180 - math.degrees(math.acos(max(-1, min(1, sum(a * b for a, b in zip(u, v)) / (nu * nv)))))
 
-        return f"Closed profile with {len(points)} points ({len(points)} lines)"
+        # a vertex of a solid joins three edges (two of the outline, one across the thickness):
+        # look at every pair
+        return sum(1 for dirs in ends.values()
+                   if any(0.5 < turn(dirs[i], dirs[j]) < 20
+                          for i in range(len(dirs)) for j in range(i + 1, len(dirs))))
+
 
     # ---------- Features ----------
 
@@ -1267,6 +1471,11 @@ class InventorConnection:
             }
             info["faces"] = body.Faces.Count
             info["edges"] = body.Edges.Count
+            shallow = self.faceting(body)
+            if shallow >= 8:
+                info["warning"] = (f"{shallow} shallow kinks between straight edges — curves look drawn as "
+                                   "many short lines. Use arcs: draw_closed_profile radii / through, "
+                                   "draw_arc, draw_slot, draw_rectangle(corner_radius), project_edges.")
         except Exception:
             info["body"] = "none"
         feats = []
