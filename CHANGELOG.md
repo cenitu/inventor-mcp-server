@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- **Materials for many parts.** Parts were created on "Generic" and given materials one by one later.
+  - `set_material(material, parts="*PLATE*,*BRACKET*", only_generic, path)` — every matching part of
+    the assembly at once; Content Center and library parts are left alone;
+  - `material_report` — material and mass per part, counts per material, total mass, and what needs a
+    look: Generic parts, vendor models made of surfaces (no volume, mass too low), parts with no mass
+    (e.g. a Content Center member placed without a length);
+  - `list_materials(search)` — the exact library names; a misspelled name gets the closest ones;
+  - `create_part(material=, part_number=, description=)`;
+  - `properties(mass_kg=…)` overrides the mass (a 1.23 kg motor made of surfaces showed 0.23 kg);
+  - `inspect` warns about surface bodies (WorkSurfaces and open shells).
 - **Faces of nested components.** `assembly_faces(path, surface, normal, at, diameter)` finds faces of
   a component anywhere in the assembly ("Sub:1/Part:1"; a sub-assembly path searches every part in
   it), in top assembly coordinates, each with a ref ("Sub:1/Part:1#F12"). Agents had to walk
