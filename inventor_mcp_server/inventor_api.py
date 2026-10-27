@@ -1808,8 +1808,28 @@ class InventorConnection:
     _CLUTTER = ("Sketches", "Sketches3D", "UserWorkPlanes", "UserWorkAxes", "UserWorkPoints",
                 "OriginWorkPlanes", "OriginWorkAxes", "OriginWorkPoints")
 
+    # Z-up views: (direction from the model to the eye, up vector)
+    _ZUP = {"iso": ((1, -1, 1), (0, 0, 1)), "iso_left": ((-1, -1, 1), (0, 0, 1)),
+            "iso_bottom": ((1, -1, -1), (0, 0, 1)), "front": ((0, -1, 0), (0, 0, 1)),
+            "back": ((0, 1, 0), (0, 0, 1)), "top": ((0, 0, 1), (0, 1, 0)),
+            "bottom": ((0, 0, -1), (0, -1, 0)), "left": ((-1, 0, 0), (0, 0, 1)),
+            "right": ((1, 0, 0), (0, 0, 1))}
+
+    def _z_up_view(self, cam, name):
+        """Point the camera for a model built with Z up (Inventor's named views assume Y up)."""
+        rb = self.active_document().ComponentDefinition.RangeBox
+        lo, hi = rb.MinPoint, rb.MaxPoint
+        center = [(lo.X + hi.X) / 2, (lo.Y + hi.Y) / 2, (lo.Z + hi.Z) / 2]
+        span = max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z, 1.0)
+        (dx, dy, dz), up = self._ZUP[name]
+        tg = self._tg()
+        cam.Target = tg.CreatePoint(*center)
+        cam.Eye = tg.CreatePoint(center[0] + dx * span * 3, center[1] + dy * span * 3, center[2] + dz * span * 3)
+        cam.UpVector = tg.CreateUnitVector(*up)
+
     def view_images(self, views=("iso",), width: int = 800, height: int = 600,
-                    white: bool = False, focus: str = "", sketches: bool = False) -> list[str]:
+                    white: bool = False, focus: str = "", sketches: bool = False,
+                    up: str = "y") -> list[str]:
         """Render the active document from each named view into PNG files and return their
         paths. The camera is put back afterwards, so the user's view doesn't jump.
         focus: an occurrence name — zoom to that component instead of the whole model."""
@@ -1839,7 +1859,10 @@ class InventorConnection:
         try:
             for name in views:
                 if name != "current":
-                    cam.ViewOrientationType = self.VIEWS[name]
+                    if up.lower() == "z":
+                        self._z_up_view(cam, name)
+                    else:
+                        cam.ViewOrientationType = self.VIEWS[name]
                     cam.Perspective = False
                     cam.Fit()
                     cam.Apply()
@@ -2226,14 +2249,18 @@ class InventorConnection:
         if key in cache:
             return cache[key]
         node, walked = self.app.ContentCenter.TreeViewTopNode, []
-        for seg in (key.split("/") if key else []):
-            kids = [node.ChildNodes.Item(i) for i in range(1, node.ChildNodes.Count + 1)]
-            match = next((k for k in kids if k.DisplayName.lower() == seg.lower()), None)
-            if match is None:
-                raise RuntimeError(f"No category {seg!r} under {'/'.join(walked) or 'Content Center'}. "
+        segs, i = (key.split("/") if key else []), 0
+        while i < len(segs):
+            kids = [node.ChildNodes.Item(k) for k in range(1, node.ChildNodes.Count + 1)]
+            names = {k.DisplayName.lower(): k for k in kids}
+            # longest match first: a name like "Square/Rectangular Tubes" spans two segments
+            j = next((j for j in range(len(segs), i, -1) if "/".join(segs[i:j]).lower() in names), None)
+            if j is None:
+                raise RuntimeError(f"No category {segs[i]!r} under {'/'.join(walked) or 'Content Center'}. "
                                    f"There: {', '.join(k.DisplayName for k in kids)}")
-            node = match
-            walked.append(match.DisplayName)
+            node = names["/".join(segs[i:j]).lower()]
+            walked.append(node.DisplayName)
+            i = j
         cache[key] = node
         return node
 
@@ -2297,13 +2324,121 @@ class InventorConnection:
                 file_name = os.path.join(ws, "Content Center Custom", safe + ".ipt")
             file_name = os.path.abspath(file_name)
             os.makedirs(os.path.dirname(file_name), exist_ok=True)
-        result = self._silently(lambda: fam.CreateMember(
-            row, 0, "", 51969, custom, file_name if custom else "", values))  # kUseDefaultRefreshSetting
-        path = next((r for r in (result if isinstance(result, tuple) else (result,))
-                     if isinstance(r, str) and r.lower().endswith(".ipt")), None)
-        if not path or not os.path.exists(path):
-            raise RuntimeError(f"Content Center did not create the part: {result}")
+        if custom and os.path.exists(file_name):
+            path = file_name  # made before (frames reuse one file per profile and length)
+        else:
+            result = self._silently(lambda: fam.CreateMember(
+                row, 0, "", 51969, custom, file_name if custom else "", values))  # kUseDefaultRefreshSetting
+            path = next((r for r in (result if isinstance(result, tuple) else (result,))
+                         if isinstance(r, str) and r.lower().endswith(".ipt")), None)
+            if not path or not os.path.exists(path):
+                raise RuntimeError(f"Content Center did not create the part: {result}")
         return f"{fam.DisplayName} {label(row)}" + (f" L={length:g} mm" if custom else "") + f": {path}"
+
+    # ---------- Frames: profiles along skeleton lines (Frame Generator has no API) ----------
+
+    def _member_geometry(self, path: str, length: float) -> tuple[int, list, list]:
+        """Length axis (0/1/2 = X/Y/Z) of a member part and its range box in mm, read once."""
+        cache = self.__dict__.setdefault("_member_geom", {})
+        if path not in cache:
+            doc = self.app.Documents.Open(path, False)
+            rb = doc.ComponentDefinition.RangeBox
+            lo = [rb.MinPoint.X * 10, rb.MinPoint.Y * 10, rb.MinPoint.Z * 10]
+            hi = [rb.MaxPoint.X * 10, rb.MaxPoint.Y * 10, rb.MaxPoint.Z * 10]
+            axis = min(range(3), key=lambda i: abs((hi[i] - lo[i]) - length))
+            cache[path] = (axis, lo, hi)
+            if not doc.ReferencingDocuments.Count:
+                doc.Close(True)
+        return cache[path]
+
+    @staticmethod
+    def _frame_axes(direction, roll_deg: float):
+        """World directions for a member's section axes (u, v) and length axis w. u is level
+        (perpendicular to world Z) unless the member is vertical; roll turns the section."""
+        import math as m
+        n = m.sqrt(sum(c * c for c in direction))
+        w = [c / n for c in direction]
+        ref = [0.0, 0.0, 1.0] if abs(w[2]) < 0.999 else [1.0, 0.0, 0.0]
+        u = [ref[1] * w[2] - ref[2] * w[1], ref[2] * w[0] - ref[0] * w[2], ref[0] * w[1] - ref[1] * w[0]]
+        nu = m.sqrt(sum(c * c for c in u))
+        u = [c / nu for c in u]
+        v = [w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0]]
+        if roll_deg:
+            c, s = m.cos(m.radians(roll_deg)), m.sin(m.radians(roll_deg))
+            u, v = [c * a + s * b for a, b in zip(u, v)], [-s * a + c * b for a, b in zip(u, v)]
+        return u, v, w
+
+    def frame_members(self, members: list[dict], folder: str = "", category: str = "",
+                      family: str = "", size: str = "") -> str:
+        """Place structural members along skeleton lines in the active assembly.
+
+        members: [{"start": [x,y,z], "end": [x,y,z], "family": ..., "size": ...,
+                   "category": ..., "roll": 0, "anchor": "center"|"origin",
+                   "extend": [0, 0], "name": ...}] in mm. family/size/category default to
+        the call's own arguments. Each member is a Content Center custom-length part, one file
+        per profile and length (reused). anchor "center" puts the section's middle on the
+        line, "origin" the profile's own origin. Returns the placements and a cut list.
+        """
+        import math as m
+        comp = self.active_assembly()
+        if folder:
+            folder = os.path.abspath(folder)
+            os.makedirs(folder, exist_ok=True)
+        placed, problems, cuts = [], [], {}
+        for n, mb in enumerate(members, 1):
+            try:
+                fam_cat = mb.get("category") or category
+                fam = mb.get("family") or family
+                sz = mb.get("size") or size
+                if not (fam_cat and fam and sz):
+                    raise ValueError("category, family and size are needed (per member or for the call)")
+                start = [float(c) for c in mb["start"]]
+                end = [float(c) for c in mb["end"]]
+                d = [b - a for a, b in zip(start, end)]
+                line = m.sqrt(sum(c * c for c in d))
+                if line < 1:
+                    raise ValueError("start and end are the same point")
+                ext0, ext1 = (list(mb.get("extend") or [0, 0]) + [0, 0])[:2]
+                length = round(line + ext0 + ext1, 1)
+                file_name = ""
+                if folder:
+                    safe = "".join(ch for ch in f"{fam} {sz} L{length:g}" if ch not in '<>:"/\\|?*')
+                    file_name = os.path.join(folder, safe + ".ipt")
+                out = self.content_center(fam_cat, fam, sz, length, file_name)
+                path = out.rsplit(": ", 1)[1]
+                axis, lo, hi = self._member_geometry(path, length)
+                u, v, w = self._frame_axes(d, float(mb.get("roll", 0)))
+                # local axes: the length axis goes along w, the next two (cyclic) along u, v
+                world = [None, None, None]
+                world[axis], world[(axis + 1) % 3], world[(axis + 2) % 3] = w, u, v
+                # the local point that must sit on the start of the line
+                local = [0.0, 0.0, 0.0]
+                local[axis] = lo[axis]
+                if mb.get("anchor", "center") == "center":
+                    for i in ((axis + 1) % 3, (axis + 2) % 3):
+                        local[i] = (lo[i] + hi[i]) / 2
+                begin = [s - ext0 * c / line for s, c in zip(start, d)]
+                origin = [b - sum(local[i] * world[i][k] for i in range(3)) for k, b in enumerate(begin)]
+                occ = comp.Occurrences.Add(path, self._placement(*origin, world[0], world[1]))
+                if mb.get("name"):
+                    try:
+                        occ.Name = mb["name"]
+                    except Exception:
+                        problems.append(f"#{n}: name {mb['name']!r} taken, kept {occ.Name}")
+                placed.append(f"{occ.Name}: {fam} {sz} L={length:g}")
+                key = (fam, sz, length)
+                cuts[key] = cuts.get(key, 0) + 1
+            except Exception as e:
+                problems.append(f"#{n}: {e}")
+        lines = [f"Placed {len(placed)} of {len(members)} members"] + [f"  {p}" for p in placed]
+        if cuts:
+            lines.append("Cut list:")
+            for (fam, sz, length), qty in sorted(cuts.items()):
+                lines.append(f"  {qty} x {fam} {sz}  L={length:g} mm")
+        if problems:
+            lines.append("Problems:")
+            lines += [f"  {p}" for p in problems]
+        return "\n".join(lines)
 
     # ---------- Vendor parts, clearance checks, motion ----------
 

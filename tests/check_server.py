@@ -152,7 +152,7 @@ import base64, tempfile
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
-def fake_views(self, views, width, height, white, focus, sketches):
+def fake_views(self, views, width, height, white, focus, sketches, up):
     folder = tempfile.mkdtemp()
     paths = [os.path.join(folder, f"{v}.png") for v in views]
     for p in paths:

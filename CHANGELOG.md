@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`frame_members`** — a steel frame from skeleton lines: each member (start, end, profile, roll,
+  `anchor` center/origin, `extend` at either end) becomes a Content Center custom-length part turned
+  along its line; one file per profile and length, reused. Returns the placements and a cut list.
+  Frame Generator itself exposes no API (its add-in has no Automation object and its commands need
+  interactive selection), so this does its core job with the Content Center.
+- **`view_image(up="z")`** — named views for models built with Z up (Inventor's own assume Y up):
+  front looks along +Y, top down -Z.
+
+### Fixed
+- **`content_center` with a "/" in a category name** ("Structural Shapes/Square/Rectangular Tubes")
+  — the path is matched longest-name-first.
+- `content_center` reuses a custom member file that already exists instead of asking Content
+  Center to make it again.
+
 ## 0.6.0 — 2026-10-27
 
 ### Added

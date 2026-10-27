@@ -140,6 +140,15 @@ the next Inventor start stays as it was. Inventor refuses to switch while any do
 - `DispatchEx` can hand back an Inventor that is already running (one left half-quit by a client
   that exited right after `Quit()`) instead of starting a new one — and calls on it can hang.
 
+## Frame Generator
+
+No API: `ApplicationAddIns.ItemById("{AC211AE0-A7A5-4589-916D-81C529DA6D17}").Automation` is None after
+`Activate()`, the type library has no Frame Generator classes (only `FrameGeneratorFileNamingOptions`),
+and its commands (`AFG_CMD_InsertProfile`, `AFG_Mitrecut_Profiles`, …) need interactive selection.
+`frame_members` places Content Center custom-length members instead. A member part's length axis is
+found from its range box (the axis whose extent equals the length); its section center from the
+other two.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
