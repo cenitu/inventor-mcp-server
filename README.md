@@ -29,11 +29,12 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Features
 
-- **57 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
+- **58 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
 - **Assemblies with vendor parts**: `import_step` (keeps the files in your project folder), placement with full orientation, `check_interference` / `measure_distance`, and `sweep_rotation` to check a door or lock moves freely through its whole range
 - **Assemblies (IAM)**: place components, ground them, constrain by origin geometry (mate / flush / angle) or drop a bolt into a hole with a single Insert constraint
 - **`execute_python` power tool** — run arbitrary Python against the live COM connection with a persistent namespace (escape hatch for anything not covered by dedicated tools)
 - **Auto-reporting** — every feature operation returns a volume/topology delta (`Hole1 | V 23497 (-503 mm³) | F7 E14`), so the AI can self-verify each step
+- **Never hangs on a dialog** — calls run with `SilentOperation` on a dedicated Inventor thread. A call stuck behind a modal dialog, or a long job, returns within 50 s with the dialog's title and text (read from the window list, no COM call); `call_status` follows it and returns the result when it finishes
 - **Transactions** — wrap multi-step builds, roll back everything with one call
 - **Hot reload** — edit the API wrapper and reload without restarting the MCP client
 - **Topology helpers** — find edges/faces by coordinates instead of guessing indices
@@ -87,7 +88,7 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 4. Restart the MCP client (MCP servers load at session start), start Inventor, then ask your AI assistant to build something.
 
-> **Do NOT use `win32com.client.gencache.EnsureDispatch`** in your own scripts against the same Python install — the generated `gen_py` cache breaks `GetActiveObject`. If it happens: delete `%LOCALAPPDATA%\Temp\gen_py`. See the API notes for the full story.
+> **Avoid `win32com.client.gencache.EnsureDispatch` and `CastTo`** in your own scripts against the same Python install — they generate a `gen_py` cache that breaks plain `GetActiveObject` (`KeyError: '_dispobj_'`). The server itself is immune since 0.4.1 (it never uses gen_py classes), but your scripts aren't: delete `%LOCALAPPDATA%\Temp\gen_py` if it happens. See the API notes for the full story.
 
 ## Smoke test
 

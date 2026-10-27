@@ -1,6 +1,12 @@
 """MCP Server for Autodesk Inventor parametric modeling."""
 
+import concurrent.futures
+import functools
 import json
+import os
+import time
+
+import pythoncom
 try:
     # MCP Python SDK 2.x — FastMCP was renamed MCPServer
     from mcp.server import MCPServer as FastMCP
@@ -33,11 +39,131 @@ inv = _api.InventorConnection()
 
 # Persistent namespace for execute_python (variables survive between calls)
 _exec_ns: dict = {}
+_exec_ns_created = time.time()
+_exec_output = None  # stdout buffer of the execute_python call in progress
+
+
+# ---------- Inventor call thread ----------
+#
+# Every Inventor call runs on this one thread (COM objects stay on the thread that made
+# them). The tool waits CALL_TIMEOUT seconds at most, so a call stuck behind a modal
+# dialog, or a long job, no longer freezes the whole server: the client gets an answer
+# before its own timeout, and call_status picks up the result later.
+
+CALL_TIMEOUT = float(os.environ.get("INVENTOR_MCP_CALL_TIMEOUT", "50"))
+_com_thread = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="inventor-com", initializer=pythoncom.CoInitialize)
+
+
+class _Call:
+    def __init__(self, name, future):
+        self.name, self.future = name, future
+        self.started, self.finished = time.monotonic(), None
+        self.timed_out = False      # outlived CALL_TIMEOUT: the client never saw the result
+        self.collected = False      # call_status has returned the result
+        future.add_done_callback(lambda _: setattr(self, "finished", time.monotonic()))
+
+
+_last_call: _Call | None = None
+
+
+def _dialog_report() -> str:
+    try:
+        dialogs = _api.modal_dialogs(inv.main_hwnd)
+    except Exception:
+        return ""
+    if not dialogs:
+        return ""
+    lines = ["Inventor is showing a modal dialog. It blocks every API call until someone "
+             "answers it in Inventor — ask the user to read it and click the right button:"]
+    lines += [f'  [{d["title"]}] {d["text"]}' for d in dialogs]
+    return "\n".join(lines)
+
+
+def _busy_report(call: _Call) -> str:
+    msg = f"'{call.name}' has been running for {time.monotonic() - call.started:.0f} s."
+    return msg + "\n" + (_dialog_report() or
+                         "No dialog is open — Inventor is still working on it (a long operation).")
+
+
+def _silent_call(fn, args, kwargs):
+    """Runs on the Inventor thread, with SilentOperation on: Inventor answers its own
+    prompts (save dependents?, use the resolved file?) with the default instead of
+    opening a dialog that waits for a click."""
+    app, prev = inv._app, None
+    if app is not None:
+        try:
+            prev = app.SilentOperation
+            app.SilentOperation = True
+        except Exception:
+            app = None
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        if app is not None:
+            try:
+                app.SilentOperation = prev
+            except Exception:
+                pass
+
+
+def _on_com_thread(fn, args, kwargs):
+    global _last_call
+    if _last_call is not None and not _last_call.future.done():
+        return (_busy_report(_last_call) + f"\nThis '{fn.__name__}' call was NOT started. "
+                "Use call_status to follow the running call.")
+    blocker = _dialog_report()
+    if blocker:
+        return blocker + f"\nThis '{fn.__name__}' call was NOT started. Retry once the dialog is closed."
+    call = _Call(fn.__name__, _com_thread.submit(_silent_call, fn, args, kwargs))
+    _last_call = call
+    try:
+        return call.future.result(timeout=CALL_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        call.timed_out = True
+        return (_busy_report(call) + "\nIt keeps running in the background — "
+                "call call_status to follow it and get its result.")
+
+
+def tool(com: bool = True):
+    """mcp.tool() that runs the function on the Inventor thread (see above).
+    com=False for tools that must answer while that thread is busy."""
+    def deco(fn):
+        if not com:
+            return mcp.tool()(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return _on_com_thread(fn, args, kwargs)
+        return mcp.tool()(wrapper)
+    return deco
+
+
+@tool(com=False)
+def call_status() -> str:
+    """Follow a call that outlived the wait (a long job, or one stuck behind an Inventor
+    dialog): elapsed time, any open dialog's text, execute_python output so far — and
+    the call's result once it has finished. Safe to call at any time."""
+    c = _last_call
+    if c is None:
+        return "No Inventor call has been made yet."
+    if not c.future.done():
+        out = _exec_output.getvalue().strip() if c.name == "execute_python" and _exec_output else ""
+        return _busy_report(c) + (f"\nOutput so far:\n{out[-3000:]}" if out else "")
+    took = f"{c.finished - c.started:.0f} s"
+    if not c.timed_out or c.collected:
+        return f"Last call '{c.name}' finished ({took}); its result was already returned."
+    c.collected = True
+    try:
+        result = c.future.result()
+    except Exception as e:
+        result = f"ERROR: {type(e).__name__}: {e}"
+    return f"'{c.name}' finished after {took}:\n{result}"
 
 
 # ---------- Power tools (token savers) ----------
 
-@mcp.tool()
+@tool()
 def execute_python(code: str) -> str:
     """Execute Python code against the live Inventor connection.
 
@@ -47,11 +173,17 @@ def execute_python(code: str) -> str:
       doc  — active document          comp — its ComponentDefinition
       body — comp.SurfaceBodies.Item(1) (or None)
       tg   — TransientGeometry        math — math module
-    Variables you assign persist between calls (one shared namespace).
+    Variables you assign persist between calls (one shared namespace) until the server
+    restarts or reload_api runs — status shows the namespace's age and names.
     Internal COM units are CENTIMETERS — divide mm by 10.
+    Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
+    directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
+    Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
+    a dialog. A call longer than the wait limit keeps running; follow it with call_status.
     Returns captured stdout (print your results!) or the traceback on error.
     """
     import io, contextlib, traceback, math as _math
+    global _exec_output
     ctx = {"inv": inv, "math": _math}
     try:
         if not inv.is_connected():
@@ -68,10 +200,11 @@ def execute_python(code: str) -> str:
     except Exception:
         pass
     _exec_ns.update(ctx)
-    buf = io.StringIO()
+    buf = _exec_output = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            exec(compile(code, "<mcp>", "exec"), _exec_ns)
+            # silent again in case this call connected first (the thread found no app)
+            inv._silently(lambda: exec(compile(code, "<mcp>", "exec"), _exec_ns))
         out = buf.getvalue().strip()
         if len(out) > 6000:
             out = out[:6000] + "\n... (truncated at 6000 chars)"
@@ -82,21 +215,22 @@ def execute_python(code: str) -> str:
         return (partial + "\n" if partial else "") + f"ERROR:\n{tb}"
 
 
-@mcp.tool()
+@tool()
 def reload_api() -> str:
     """Hot-reload inventor_api.py from disk. Use after editing the wrapper —
     no Claude Code restart needed. Keeps the existing COM connection."""
     import importlib
-    global inv
+    global inv, _exec_ns_created
     importlib.reload(_api)
-    old_app = inv._app
+    old = inv
     inv = _api.InventorConnection()
-    inv._app = old_app
+    inv._app, inv.main_hwnd = old._app, old.main_hwnd
     _exec_ns.clear()
+    _exec_ns_created = time.time()
     return "inventor_api.py reloaded (connection preserved)"
 
 
-@mcp.tool()
+@tool()
 def inspect() -> str:
     """Compact snapshot of the active part: volume, bbox, faces/edges count,
     feature tree with names, sketches, sheet metal thickness. One call instead
@@ -104,21 +238,21 @@ def inspect() -> str:
     return json.dumps(inv.inspect(), indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def list_edges(min_length: float = 0, max_count: int = 60) -> str:
     """Compact edge table of body 1: '[i] L=200.0 mid=(0.0,-225.0,0.8)' per line.
     Use to locate edges for flange/fillet/chamfer. min_length filters small edges (mm)."""
     return inv.list_edges(min_length=min_length, max_count=max_count)
 
 
-@mcp.tool()
+@tool()
 def list_faces(min_area: float = 0, max_count: int = 60) -> str:
     """Compact face table of body 1: '[i] Plane A=90000 c=(0.0,225.0,12.5)' per line.
     Use to locate faces for sketching/cuts. min_area filters small faces (mm²)."""
     return inv.list_faces(min_area=min_area, max_count=max_count)
 
 
-@mcp.tool()
+@tool()
 def transaction(action: str = "begin", name: str = "MCP batch") -> str:
     """Wrap multiple operations in one undo unit with rollback.
 
@@ -132,7 +266,7 @@ def transaction(action: str = "begin", name: str = "MCP batch") -> str:
 
 # ---------- Connection ----------
 
-@mcp.tool()
+@tool()
 def connect(visible: bool = True) -> str:
     """Connect to Autodesk Inventor. Starts Inventor if not running.
 
@@ -142,21 +276,29 @@ def connect(visible: bool = True) -> str:
     return inv.connect(visible)
 
 
-@mcp.tool()
+@tool()
 def status() -> str:
-    """Check connection status and active document info."""
+    """Check connection status, active document info, and the execute_python
+    namespace (age, names you defined — gone after a server restart or reload_api).
+    If Inventor is busy or showing a dialog, says so instead."""
     if not inv.is_connected():
         return "Not connected to Inventor. Call connect() first."
     try:
         info = inv.get_document_info()
-        return json.dumps(info, indent=2, ensure_ascii=False)
     except RuntimeError:
-        return "Connected to Inventor, but no document is open."
+        info = {"document": None}
+    defined = sorted(k for k in _exec_ns
+                     if not k.startswith("__") and k not in ("inv", "app", "doc", "comp", "body", "tg", "math"))
+    info["python_namespace"] = {
+        "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(_exec_ns_created)),
+        "names": defined,
+    }
+    return json.dumps(info, indent=2, ensure_ascii=False)
 
 
 # ---------- Document management ----------
 
-@mcp.tool()
+@tool()
 def create_part(name: str = "", template: str = "metric") -> str:
     """Create a new empty part document.
 
@@ -167,7 +309,7 @@ def create_part(name: str = "", template: str = "metric") -> str:
     return inv.create_part(name or None, template)
 
 
-@mcp.tool()
+@tool()
 def save_document(path: str = "") -> str:
     """Save the active document — never opens a dialog. Saving in place also saves
     dependents that changed (e.g. sub-assemblies), which would otherwise trigger
@@ -179,20 +321,20 @@ def save_document(path: str = "") -> str:
     return inv.save_document(path or None)
 
 
-@mcp.tool()
+@tool()
 def list_documents() -> str:
     """List open documents (name, path, type, unsaved changes) and which one is active.
     Tools act on the ACTIVE document — check here when juggling several parts."""
     return json.dumps(inv.list_documents(), indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def activate_document(name_or_path: str) -> str:
     """Make an open document the active one (by display name or full path)."""
     return inv.activate_document(name_or_path)
 
 
-@mcp.tool()
+@tool()
 def export_document(path: str, format: str = "STEP") -> str:
     """Export active document to another format.
 
@@ -205,7 +347,7 @@ def export_document(path: str, format: str = "STEP") -> str:
 
 # ---------- Sketches ----------
 
-@mcp.tool()
+@tool()
 def create_sketch(plane: str = "XY", face_index: int = 0, offset: float = 0) -> str:
     """Create a new sketch on a work plane, a body face, or an offset work plane.
 
@@ -219,7 +361,7 @@ def create_sketch(plane: str = "XY", face_index: int = 0, offset: float = 0) -> 
     return inv.create_sketch(plane, fi, offset)
 
 
-@mcp.tool()
+@tool()
 def draw_rectangle(
     x: float = 0, y: float = 0,
     width: float = 100, height: float = 50,
@@ -238,7 +380,7 @@ def draw_rectangle(
     return inv.draw_rectangle(x, y, width, height, idx)
 
 
-@mcp.tool()
+@tool()
 def draw_circle(
     x: float = 0, y: float = 0,
     diameter: float = 50,
@@ -259,7 +401,7 @@ def draw_circle(
     return inv.draw_circle(x, y, diameter, idx, construction)
 
 
-@mcp.tool()
+@tool()
 def draw_line(
     x1: float = 0, y1: float = 0,
     x2: float = 100, y2: float = 0,
@@ -280,7 +422,7 @@ def draw_line(
     return inv.draw_line(x1, y1, x2, y2, idx, construction)
 
 
-@mcp.tool()
+@tool()
 def draw_polygon(
     x: float = 0, y: float = 0,
     radius: float = 25,
@@ -300,7 +442,7 @@ def draw_polygon(
     return inv.draw_polygon(x, y, radius, sides, idx)
 
 
-@mcp.tool()
+@tool()
 def draw_closed_profile(
     points: str,
     sketch_index: int = 0,
@@ -320,7 +462,7 @@ def draw_closed_profile(
 
 # ---------- Features ----------
 
-@mcp.tool()
+@tool()
 def extrude(
     distance: float = 10,
     direction: str = "positive",
@@ -341,7 +483,7 @@ def extrude(
     return inv.extrude(distance, direction, operation, idx, extent_type=extent_type)
 
 
-@mcp.tool()
+@tool()
 def revolve(
     angle: float = 360,
     axis: str = "Y",
@@ -372,7 +514,7 @@ def revolve(
     return inv.revolve(angle, idx, axis, operation)
 
 
-@mcp.tool()
+@tool()
 def fillet(radius: float = 2, edge_indices: str = "1") -> str:
     """Add fillet (rounded edge) to edges of the solid body. Radius in mm.
 
@@ -384,7 +526,7 @@ def fillet(radius: float = 2, edge_indices: str = "1") -> str:
     return inv.fillet(radius, indices)
 
 
-@mcp.tool()
+@tool()
 def chamfer(distance: float = 2, edge_indices: str = "1") -> str:
     """Add chamfer (angled edge) to edges of the solid body. Distance in mm.
 
@@ -396,7 +538,7 @@ def chamfer(distance: float = 2, edge_indices: str = "1") -> str:
     return inv.chamfer(distance, indices)
 
 
-@mcp.tool()
+@tool()
 def hole(
     x: float = 0, y: float = 0,
     diameter: float = 10,
@@ -420,7 +562,7 @@ def hole(
     return inv.hole(x, y, diameter, depth, tapped, p)
 
 
-@mcp.tool()
+@tool()
 def hole_linear(
     face_axis: str, face_value: float,
     ref1_axis: str, ref1_value: float, dist1: float,
@@ -452,7 +594,7 @@ def hole_linear(
                            tapped, p, cbore_diameter, cbore_depth)
 
 
-@mcp.tool()
+@tool()
 def circular_pattern(
     feature_index: int,
     count: int = 8,
@@ -473,14 +615,14 @@ def circular_pattern(
 
 # ---------- Parameters ----------
 
-@mcp.tool()
+@tool()
 def get_parameters() -> str:
     """Get all parameters of the active document. Returns JSON list."""
     params = inv.get_parameters()
     return json.dumps(params, indent=2, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def set_parameter(name: str, expression: str) -> str:
     """Set a parameter value by name.
 
@@ -491,7 +633,7 @@ def set_parameter(name: str, expression: str) -> str:
     return inv.set_parameter(name, expression)
 
 
-@mcp.tool()
+@tool()
 def add_parameter(name: str, expression: str, units: str = "mm") -> str:
     """Add a new user parameter.
 
@@ -505,7 +647,7 @@ def add_parameter(name: str, expression: str, units: str = "mm") -> str:
 
 # ---------- Sheet Metal ----------
 
-@mcp.tool()
+@tool()
 def set_sheet_metal_thickness(thickness: float = 0.8) -> str:
     """Override the active sheet metal style's thickness. Use after create_part(template="sheet_metal").
     If the shop has named rules (see list_sheet_metal_rules), use set_sheet_metal_rule instead —
@@ -513,7 +655,7 @@ def set_sheet_metal_thickness(thickness: float = 0.8) -> str:
     return inv.set_sheet_metal_thickness(thickness)
 
 
-@mcp.tool()
+@tool()
 def list_sheet_metal_rules() -> str:
     """List the sheet metal rules available in the active sheet metal part
     (name, thickness, bend radius, which one is active). Shops often encode
@@ -521,7 +663,7 @@ def list_sheet_metal_rules() -> str:
     return json.dumps(inv.list_sheet_metal_rules(), indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def set_sheet_metal_rule(name: str) -> str:
     """Activate a sheet metal rule by name (case-insensitive). Sets thickness,
     bend radius and unfold method together — prefer this over
@@ -530,7 +672,7 @@ def set_sheet_metal_rule(name: str) -> str:
     return inv.set_sheet_metal_rule(name)
 
 
-@mcp.tool()
+@tool()
 def sheet_metal_face(sketch_index: int = 0) -> str:
     """Create a base Sheet Metal Face from a closed sketch profile.
     The first flat panel in a sheet metal part. Uses style's Thickness automatically."""
@@ -538,7 +680,7 @@ def sheet_metal_face(sketch_index: int = 0) -> str:
     return inv.sheet_metal_face(idx)
 
 
-@mcp.tool()
+@tool()
 def flange(edge_indices: str, distance: float = 25, angle: float = 90,
            auto_miter: bool = True, miter_gap: str = "GapSize",
            height_datum: str = "outer") -> str:
@@ -565,7 +707,7 @@ def flange(edge_indices: str, distance: float = 25, angle: float = 90,
                       miter_gap=miter_gap, height_datum=height_datum)
 
 
-@mcp.tool()
+@tool()
 def cut_on_face(face_index: int, circles: str = "", rectangles: str = "") -> str:
     """Cut holes through the sheet, placed in WORLD coordinates (mm) on a face.
     Avoids the face-sketch axis confusion — no need to know the sketch's origin.
@@ -581,7 +723,7 @@ def cut_on_face(face_index: int, circles: str = "", rectangles: str = "") -> str
     return inv.cut_on_face(face_index, c, r)
 
 
-@mcp.tool()
+@tool()
 def corner_round(edge_indices: str, radius: float = 5) -> str:
     """Round sharp sheet metal corners (Corner Round — carried into the flat pattern).
     Use on exposed corners people handle, e.g. mounting plate tabs.
@@ -594,7 +736,7 @@ def corner_round(edge_indices: str, radius: float = 5) -> str:
     return inv.corner_round(idx_list, radius)
 
 
-@mcp.tool()
+@tool()
 def sheet_metal_cut(sketch_index: int = 0) -> str:
     """Cut through the panel — depth = Thickness automatically (parametric!).
     Sketch must be on the panel face (not a work plane): a cut that removes no
@@ -606,7 +748,7 @@ def sheet_metal_cut(sketch_index: int = 0) -> str:
     return inv.sheet_metal_cut(idx)
 
 
-@mcp.tool()
+@tool()
 def find_edge(x: float = 0, y: float = 0, z: float = 0,
               use_x: bool = False, use_y: bool = False, use_z: bool = False,
               tolerance: float = 0.1) -> str:
@@ -626,7 +768,7 @@ def find_edge(x: float = 0, y: float = 0, z: float = 0,
     return f"Edge {idx}"
 
 
-@mcp.tool()
+@tool()
 def find_face(x: float = 0, y: float = 0, z: float = 0,
               use_x: bool = False, use_y: bool = False, use_z: bool = False,
               min_area: float = 100, tolerance: float = 0.5) -> str:
@@ -649,14 +791,14 @@ def find_face(x: float = 0, y: float = 0, z: float = 0,
 
 # ---------- Query ----------
 
-@mcp.tool()
+@tool()
 def list_features() -> str:
     """List all features in the active part. Returns JSON list."""
     features = inv.list_features()
     return json.dumps(features, indent=2, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def delete_feature(indices: str) -> str:
     """Delete one or more features by index. Use list_features() to find indices.
 
@@ -667,7 +809,7 @@ def delete_feature(indices: str) -> str:
     return inv.delete_feature(idx_list)
 
 
-@mcp.tool()
+@tool()
 def suppress_feature(indices: str, suppressed: bool = True) -> str:
     """Suppress or unsuppress features (hide without deleting). Use list_features() to find indices.
 
@@ -681,7 +823,7 @@ def suppress_feature(indices: str, suppressed: bool = True) -> str:
 
 # ---------- Assembly (IAM) ----------
 
-@mcp.tool()
+@tool()
 def create_assembly(name: str = "", template: str = "metric") -> str:
     """Create a new empty assembly document (.iam).
 
@@ -692,7 +834,7 @@ def create_assembly(name: str = "", template: str = "metric") -> str:
     return inv.create_assembly(name or None, template)
 
 
-@mcp.tool()
+@tool()
 def place_component(
     path: str,
     x: float = 0, y: float = 0, z: float = 0,
@@ -717,7 +859,7 @@ def place_component(
     return inv.place_component(path, x, y, z, grounded, x_axis=xa, y_axis=ya)
 
 
-@mcp.tool()
+@tool()
 def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
     """Import a vendor STEP file (hinge, lock, gland...) as Inventor files in dest_folder.
     The STEP is copied into dest_folder first, because Inventor writes the parts of
@@ -733,7 +875,7 @@ def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
     return json.dumps(inv.import_step(step_path, dest_folder, name or None), indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def check_interference(set_a: str, set_b: str = "") -> str:
     """Check overlap between occurrences of the active assembly. Touching faces
     are not reported. Intended overlaps (gasket compression) show up too — read
@@ -750,14 +892,14 @@ def check_interference(set_a: str, set_b: str = "") -> str:
     return json.dumps(hits, indent=1, ensure_ascii=False) if hits else "No interference"
 
 
-@mcp.tool()
+@tool()
 def measure_distance(a: str, b: str) -> str:
     """Minimum distance in mm between two occurrences (0 = touching/overlapping).
     Names as in list_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
     return f"{inv.measure_distance(a, b)} mm"
 
 
-@mcp.tool()
+@tool()
 def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
                    start: float = 0, stop: float = 110, step: float = 10,
                    against: str = "", measure_to: str = "") -> str:
@@ -781,21 +923,21 @@ def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
     return json.dumps(rows, indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def list_occurrences() -> str:
     """Compact table of the assembly's components:
     '[1] block:1  pos=(0.0,0.0,0.0) grounded'. Indices feed the constrain tools."""
     return inv.list_occurrences()
 
 
-@mcp.tool()
+@tool()
 def assembly_info() -> str:
     """Snapshot of the active assembly: components with positions, constraint
     count, mass and volume. One call instead of several queries."""
     return json.dumps(inv.assembly_info(), indent=1, ensure_ascii=False)
 
 
-@mcp.tool()
+@tool()
 def constrain(
     occurrence1: int, geometry1: str,
     occurrence2: int, geometry2: str,
@@ -820,7 +962,7 @@ def constrain(
     return inv.constrain(occurrence1, geometry1, occurrence2, geometry2, kind, offset, angle)
 
 
-@mcp.tool()
+@tool()
 def constrain_insert(
     occurrence1: int, edge1: int,
     occurrence2: int, edge2: int,
@@ -841,7 +983,7 @@ def constrain_insert(
     return inv.constrain_insert(occurrence1, edge1, occurrence2, edge2, offset, axes_opposed)
 
 
-@mcp.tool()
+@tool()
 def list_component_edges(occurrence: int, circular_only: bool = True, max_count: int = 40) -> str:
     """Edge table of one placed component in its own part coordinates:
     '[1] circle D=10.0 c=(0.0,0.0,10.0)'. Use to pick edges for constrain_insert.
@@ -854,19 +996,19 @@ def list_component_edges(occurrence: int, circular_only: bool = True, max_count:
     return inv.list_component_edges(occurrence, circular_only, max_count)
 
 
-@mcp.tool()
+@tool()
 def list_constraints() -> str:
     """List the assembly constraints with their indices."""
     return inv.list_constraints()
 
 
-@mcp.tool()
+@tool()
 def delete_constraint(index: int) -> str:
     """Delete an assembly constraint by index (see list_constraints)."""
     return inv.delete_constraint(index)
 
 
-@mcp.tool()
+@tool()
 def ground_occurrence(index: int, grounded: bool = True) -> str:
     """Ground (fix in space) or unground a component.
 
@@ -877,7 +1019,7 @@ def ground_occurrence(index: int, grounded: bool = True) -> str:
     return inv.ground_occurrence(index, grounded)
 
 
-@mcp.tool()
+@tool()
 def delete_occurrence(index: int) -> str:
     """Remove a component from the assembly (see list_occurrences for the index)."""
     return inv.delete_occurrence(index)
