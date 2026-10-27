@@ -19,6 +19,15 @@
   classes; every object is late-bound with type info.
 
 ### Added
+- **Several Inventors at once.** `connect(new_instance=True, project=..., instance=...)` starts a
+  separate Inventor and makes the project active; every tool takes an `instance` parameter, and each
+  Inventor has its own call thread, `execute_python` namespace and `call_status`, so two agents on two
+  projects don't wait for each other or overwrite each other's variables. With one Inventor nothing
+  changes; with several, a call without `instance` is refused instead of guessing. New
+  **`list_instances`** shows them — and any Inventor it can't reach, e.g. one opened by hand (Windows
+  hands every client the first Inventor that started, so a second one must be started by the
+  server). `status` shows the instance, pid and project. Tools are async now, so the MCP SDK's event
+  loop isn't held by one agent's long call.
 - **`call_status`** — follow a call that outlived the wait: elapsed time, open dialog, `execute_python`
   output so far, and its result once finished.
 - **`status`** shows the `execute_python` namespace's age and the names defined in it.
