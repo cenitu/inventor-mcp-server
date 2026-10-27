@@ -19,8 +19,9 @@ from pydantic import Field
 try:
     # MCP Python SDK 2.x — FastMCP was renamed MCPServer
     from mcp.server import MCPServer as FastMCP
+    from mcp.server.mcpserver import Image
 except ImportError:  # SDK 1.x
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP, Image
 try:
     from . import inventor_api as _api
 except ImportError:
@@ -474,6 +475,32 @@ def reload_api() -> str:
     me.ns_created = time.time()
     me.ns_ready = False  # startup file and load_library files run again
     return "inventor_api.py reloaded (connections preserved)"
+
+
+@tool()
+def view_image(views: str = "iso", width: int = 800, height: int = 600,
+               background: str = "inventor", focus: str = "", sketches: bool = False):
+    """Look at the model: pictures of the active document, returned as images you can see.
+    Use it to check your work — a flange on the wrong side, a door opening the wrong way,
+    a part floating off the frame — which the numbers alone don't show.
+
+    Args:
+        views: Comma-separated: iso, iso_left, iso_bottom, front, back, top, bottom, left,
+               right, current (the user's view). E.g. "iso,front,top".
+        width, height: Pixels per picture (keep them modest — each picture costs tokens).
+        background: "inventor" (its gradient) or "white".
+        focus: Assembly component name — zoom to it, keeping each view's direction.
+        sketches: Show sketches and work features too (hidden by default; restored after).
+    """
+    names = [v.strip().lower() for v in views.split(",") if v.strip()]
+    paths = inv.view_images(names, width, height, background.lower() == "white", focus, sketches)
+    images = []
+    for path in paths:
+        with open(path, "rb") as f:
+            images.append(Image(data=f.read(), format="png"))
+        os.remove(path)
+    os.rmdir(os.path.dirname(paths[0]))
+    return images
 
 
 @tool()
