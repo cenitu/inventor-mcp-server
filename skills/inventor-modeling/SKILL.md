@@ -371,10 +371,12 @@ print(f"Z: {rb.MinPoint.Z*10:.2f} .. {rb.MaxPoint.Z*10:.2f} mm")
 |---|---|
 | 5890 | Plane |
 | 5891 | Cylinder |
-| 5892 | Cone (sometimes appears as 5893) |
-| 5893 | Cone (variant) |
-| 5894 | Sphere |
+| 5892 | Elliptic cylinder |
+| 5893 | Cone |
+| 5894 | Elliptic cone |
 | 5895 | Torus |
+| 5896 | Sphere |
+| 5897 | B-spline |
 
 Finding the chamfer in `Face types: {'Plane': 8, 'Cylinder': 1, 'Cone': 2}` confirms revolve-cut produced real conical surfaces.
 

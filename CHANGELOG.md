@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`call_status(wait_seconds=…)`** — waits up to 45 s (never past the call timeout) for the running
+  call and returns its result as soon as it finishes, instead of agents polling it 20+ times per long
+  job. The wait runs in a worker thread, so the server keeps answering other agents meanwhile.
+- **`cancel_call`** — stops the running call: `cancelled()` in `execute_python` code turns True, and a
+  `KeyboardInterrupt` is raised in the Inventor thread (`PyThreadState_SetAsyncExc`). It lands at the
+  next Python line, not inside a blocking COM call or behind a modal dialog. It can never hit the next
+  call: it is only raised while the call runs, and the thread clears a pending one when the call ends.
+- **`execute_python(timeout=…)`** — cancels the run the same way after that many seconds.
+- **Live output** — prints of a running `execute_python` show in `call_status` (and in the first "still
+  running" answer) as they happen, last lines first; `progress(msg)` in the namespace sets a status
+  line `call_status` shows.
+- **`save_document(save_dependents=…)`** — `False` saves only the document (`Save2(False)`). The answer
+  lists the files saved and the ones skipped.
+
+### Fixed
+- **Saving never writes library or Content Center files.** `Save2(True)` saved every dirty dependent —
+  including standard Content Center parts Inventor marks dirty when it opens an old assembly. Now each
+  dirty dependent is saved on its own, except files under the project's library paths, its Content
+  Center folder, the application's Content Center files folder, and Content Center members; a library
+  file as the active document, or a save-as into such a folder, is refused.
+- **Readable COM errors.** Tracebacks and tool errors name the HRESULT (E_FAIL, E_INVALIDARG,
+  RPC_E_DISCONNECTED "re-resolve it from app/doc", RPC_E_CALL_REJECTED, …) and the inner code of a
+  DISP_E_EXCEPTION, with a hint, instead of Windows' localized "Exception occurred."; Inventor's own
+  message (`ErrorManager`) is added when it has one.
+- **Health status by name** — `list_features`, `inspect` and `list_constraints` flag features and
+  constraints that are not healthy with the HealthStatusEnum name (`kInErrorHealth`,
+  `kInconsistentHealth`, …), read from the type library at runtime.
+- `list_faces` and the SurfaceTypeEnum notes had 5892–5896 wrong (5892 is an elliptic cylinder, 5893 a
+  cone, 5896 a sphere).
+
+### Docs
+- API notes: stale objects and lagging collections, stale assembly MassProperties, tuple-returning
+  calls, RangeBox slack on curved faces, ungrounded assembly work features, directed angle
+  constraints, invisible documents dropped, and features that can't be knit, flipped or redefined.
+
 ## 0.7.0 — 2026-10-27
 
 ### Added

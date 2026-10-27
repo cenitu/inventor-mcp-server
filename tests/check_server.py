@@ -8,6 +8,8 @@
 - the deprecated `src/` shims still forward to the package (0.2.x configs)
 - every tool has a description (it is what the AI client reads)
 - the tool count advertised in README.md matches reality
+- execute_python's live output, call_status(wait_seconds), cancel_call, readable COM
+  errors and save_document's library guard — against fake Inventor objects
 
 Exit code is the number of failed checks. For geometry, run tests/smoke_test.py
 against a real Inventor.
@@ -98,12 +100,15 @@ out = srv._on_com_thread(A, slow_job, (), {})
 check("a long call returns before the client times out", "keeps running" in out, out.splitlines()[0])
 out = srv._on_com_thread(A, quick_job, (), {})
 check("the next call is refused while one is running", "NOT started" in out)
-check("call_status reports the running call", "running for" in srv.call_status())
-gate.set()
-wait_done(A)
-out = srv.call_status()
-check("call_status returns the result once finished", "slow job done" in out, out.splitlines()[0])
-check("…only once", "already returned" in srv.call_status())
+status = lambda **kw: asyncio.run(srv.call_status(**kw))
+check("call_status reports the running call", "running for" in status())
+threading.Timer(0.3, gate.set).start()
+t = time.monotonic()
+out = status(wait_seconds=10)
+took = time.monotonic() - t
+check("call_status(wait_seconds) returns as soon as the call finishes",
+      "slow job done" in out and took < 3, f"{took:.2f} s")
+check("…only once", "already returned" in status())
 
 print("Several Inventors (no Inventor needed):")
 com_tools = [t for t in pkg_tools if t.name not in ("call_status", "list_instances")]
@@ -124,7 +129,7 @@ srv._on_com_thread(A, slow_job, (), {})
 out = srv._on_com_thread(B, quick_job, (), {})
 check("a busy Inventor doesn't hold up the other one", out.startswith("inventor-second"), out)
 check("call_status without a name reports every Inventor",
-      "[default]" in srv.call_status() and "[second]" in srv.call_status())
+      "[default]" in status() and "[second]" in status())
 gate.set()
 wait_done(A)
 srv._on_com_thread(A, lambda: A.ns.update(x=1), (), {})
@@ -146,6 +151,140 @@ check("the server answers one agent while another's call runs",
       b.startswith("inventor-second") and took < 0.4, f"{took:.2f} s")
 A.conn._app = None
 del srv._instances["second"]
+
+
+async def loop_stays_free():  # call_status(wait_seconds) must wait off the event loop
+    gate.clear()
+    srv._on_com_thread(A, slow_job, (), {})
+    waiting = asyncio.create_task(srv.call_status(wait_seconds=2))
+    t = time.monotonic()
+    await asyncio.sleep(0.05)
+    took = time.monotonic() - t
+    gate.set()
+    await waiting
+    return took
+took = asyncio.run(loop_stays_free())
+check("call_status(wait_seconds) doesn't hold up the event loop", took < 0.5, f"{took:.2f} s")
+
+print("execute_python, cancel_call, errors (fake Inventor objects):")
+import pywintypes
+
+
+class Fake:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+A.conn._app = Fake(SoftwareVersion="fake", SilentOperation=False, ActiveDocument=None,
+                   TransientGeometry=None, _oleobj_=None,
+                   ErrorManager=Fake(HasErrors=True, HasWarnings=False,
+                                     AllMessages="Sketch1 is not closed", LastMessage=""))
+run_py = lambda code, **kw: asyncio.run(srv.execute_python(code=code, **kw))
+
+out = run_py("print('first line')\nprogress('half way')\nwhile True: pass")
+check("a long execute_python shows its prints and progress() at once",
+      "first line" in out and "Progress: half way" in out, out.replace("\n", " | ")[:160])
+check("call_status shows them while it runs", "first line" in status() and "half way" in status())
+out = asyncio.run(srv.cancel_call())
+check("cancel_call stops a while-True loop", "CANCELLED (cancel_call)" in out and "first line" in out,
+      out.replace("\n", " | ")[:160])
+out = srv._on_com_thread(A, quick_job, (), {})
+check("the Inventor thread works after a cancel", out.startswith("inventor-default"), out)
+out = run_py("print('polling')\nwhile not cancelled(): pass", timeout=0.2)
+check("execute_python(timeout) cancels the run", "timeout 0.2 s" in out,
+      out.replace("\n", " | ")[:160])
+check("cancel_call with nothing running says so", "Nothing is running" in asyncio.run(srv.cancel_call()))
+
+for i in range(60):  # a cancel that races the end of a call must not hit the next one
+    threading.Timer(0.0004 * (i % 6), lambda: srv._cancel(A, A.last_call)).start()
+    try:
+        srv._on_com_thread(A, lambda: sum(range(30000)), (), {})
+    except srv._Cancelled:
+        pass
+    wait_done(A)
+out = srv._on_com_thread(A, quick_job, (), {})
+check("cancels racing the end of a call never leak into the next", out.startswith("inventor-default"), out)
+
+out = run_py("import pywintypes\nraise pywintypes.com_error(-2147352567, 'Özel durum oluştu.', "
+             "(0, None, None, None, 0, -2147024809), None)")
+check("execute_python names the HRESULT and the inner scode",
+      "DISP_E_EXCEPTION" in out and "inner E_INVALIDARG" in out, out.splitlines()[-2])
+check("…and adds Inventor's own message", "Inventor says: Sketch1 is not closed" in out)
+
+
+def disconnected():
+    raise pywintypes.com_error(-2147417848, "Nesne bağlantısı kesildi", None, None)
+
+
+try:
+    srv._on_com_thread(A, disconnected, (), {})
+    check("a tool's COM error reads as its name", False)
+except RuntimeError as e:
+    check("a tool's COM error reads as its name", "RPC_E_DISCONNECTED" in str(e) and "re-resolve" in str(e), str(e)[:120])
+api = srv._api
+check("health status numbers read as enum names (fallback)",
+      api.health_name(A.conn._app, 11781) == "kInErrorHealth" and api.health_name(None, 11778) == "kUpToDateHealth")
+check("only unhealthy features are flagged",
+      api.unhealthy(None, Fake(HealthStatus=11786)) == "kInconsistentHealth"
+      and api.unhealthy(None, Fake(HealthStatus=11778)) == "")
+A.conn._app = None
+
+print("save_document never writes library files (fake Inventor objects):")
+import tempfile
+root = tempfile.mkdtemp()
+lib, cc = os.path.join(root, "Library"), os.path.join(root, "CC Files")
+for d in (lib, cc):
+    os.makedirs(d)
+
+
+def fake_doc(name, folder, dirty=True, member=False, refs=()):
+    d = Fake(DisplayName=name, FullFileName=os.path.join(folder, name) if folder else "", Dirty=dirty,
+             DocumentType=12291 if name.endswith(".iam") else 12290, AllReferencedDocuments=list(refs),
+             ComponentDefinition=Fake(IsContentMember=member), saves=[])
+    d.Save2 = lambda deps=True, d=d: (d.saves.append(deps), setattr(d, "Dirty", False))
+    d.SaveAs = lambda path, copy, d=d: d.saves.append(path)
+    return d
+
+
+def fake_app(active):
+    paths = [Fake(Path="Library")]
+    proj = Fake(FullFileName=os.path.join(root, "p.ipj"), ContentCenterPath="",
+                LibraryPaths=Fake(Count=1, Item=lambda i: paths[i - 1]))
+    return Fake(ActiveDocument=active, SilentOperation=False, Documents=[active],
+                DesignProjectManager=Fake(ActiveDesignProject=proj),
+                FileOptions=Fake(ContentCenterPath=cc))
+
+
+mine, sub = fake_doc("plate.ipt", root), fake_doc("frame.iam", root)
+std, std2 = fake_doc("ISO 4762 M8x20.ipt", cc), fake_doc("bracket.ipt", lib)
+member, clean = fake_doc("U 100 L1500.ipt", root, member=True), fake_doc("pin.ipt", root, dirty=False)
+asm = fake_doc("top.iam", root, refs=[mine, sub, std, std2, member, clean])
+c = api.InventorConnection()
+c._app = fake_app(asm)
+out = c.save_document()
+check("dirty project files are saved one by one, without dependents",
+      mine.saves == [False] and sub.saves == [False] and asm.saves == [False] and clean.saves == [],
+      out.splitlines()[1])
+check("Content Center / library files and members are skipped",
+      std.saves == std2.saves == member.saves == [] and "Not saved (3" in out, out.replace("\n", " | "))
+mine.Dirty = True
+asm2 = fake_doc("top2.iam", root, refs=[mine])
+c._app = fake_app(asm2)
+out = c.save_document(save_dependents=False)
+check("save_dependents=False saves only the document", asm2.saves == [False] and mine.saves == [False]
+      and "left unsaved" in out, out.replace("\n", " | "))
+c._app = fake_app(std)
+try:
+    c.save_document()
+    check("a Content Center file itself is never saved", False)
+except RuntimeError as e:
+    check("a Content Center file itself is never saved", std.saves == [] and "library file" in str(e), str(e)[:100])
+c._app = fake_app(fake_doc("new.ipt", ""))
+try:
+    c.save_document(os.path.join(cc, "new.ipt"))
+    check("nothing is saved into a Content Center folder", False)
+except RuntimeError as e:
+    check("nothing is saved into a Content Center folder", "Content Center folder" in str(e), str(e)[:100])
 
 print("Pictures (no Inventor needed):")
 import base64, tempfile

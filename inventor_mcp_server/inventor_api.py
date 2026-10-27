@@ -41,6 +41,134 @@ kAlignedDim    = 19203
 kLineSegmentCurve = 5123
 kCircleCurve      = 5124
 
+# SurfaceTypeEnum (Face.SurfaceType)
+SURFACE_TYPES = {5889: "Unknown", 5890: "Plane", 5891: "Cylinder", 5892: "EllipticCylinder",
+                 5893: "Cone", 5894: "EllipticCone", 5895: "Torus", 5896: "Sphere", 5897: "BSpline"}
+
+
+# ---------- Readable errors ----------
+#
+# A com_error's own text is Windows' localized message for the HRESULT ('Özel durum
+# oluştu.' = 'Exception occurred.') — it says nothing. The HRESULT's name, the inner
+# scode of a DISP_E_EXCEPTION and a hint do.
+
+HRESULTS = {
+    0x80004005: ("E_FAIL", "Inventor refused the operation — check the inputs and the geometry"),
+    0x80070057: ("E_INVALIDARG", "an argument is wrong: type, cm units, an object of another "
+                                 "document, or a proxy needed in an assembly"),
+    0x80004001: ("E_NOTIMPL", "not available for this object or document type"),
+    0x80004002: ("E_NOINTERFACE", "the object is not of the type this call needs"),
+    0x8000FFFF: ("E_UNEXPECTED", "Inventor is in a state that doesn't allow this call"),
+    0x80070005: ("E_ACCESSDENIED", "read-only file or object"),
+    0x80020009: ("DISP_E_EXCEPTION", "Inventor raised an error inside the call"),
+    0x80020003: ("DISP_E_MEMBERNOTFOUND", "no such property or method on this object"),
+    0x80020006: ("DISP_E_UNKNOWNNAME", "no such property or method on this object"),
+    0x80020005: ("DISP_E_TYPEMISMATCH", "an argument has the wrong type"),
+    0x8002000B: ("DISP_E_BADINDEX", "index out of range — COM collections start at 1"),
+    0x8002000E: ("DISP_E_BADPARAMCOUNT", "wrong number of arguments"),
+    0x80010108: ("RPC_E_DISCONNECTED", "the object was disconnected — re-resolve it from app/doc "
+                                       "(it went stale: document closed/reopened, feature deleted)"),
+    0x80010001: ("RPC_E_CALL_REJECTED", "Inventor is busy (a dialog or another operation) — retry"),
+    0x8001010A: ("RPC_E_SERVERCALL_RETRYLATER", "Inventor is busy — retry"),
+    0x800706BA: ("RPC_S_SERVER_UNAVAILABLE", "Inventor is gone (closed or crashed) — connect again"),
+    0x800706BE: ("RPC_S_CALL_FAILED", "Inventor crashed or closed during the call — connect again"),
+}
+
+
+def hresult_name(code) -> str:
+    """'E_INVALIDARG (0x80070057): <hint>' — or the bare hex for an unknown code."""
+    if code is None:
+        return ""
+    code &= 0xFFFFFFFF
+    name, hint = HRESULTS.get(code, ("", ""))
+    return f"{name} (0x{code:08X})" + (f": {hint}" if hint else "") if name else f"0x{code:08X}"
+
+
+def describe_com_error(e) -> str:
+    """One readable line for a pywintypes.com_error; str(e) for anything else."""
+    args = getattr(e, "args", ())
+    if type(e).__name__ != "com_error" or not args or not isinstance(args[0], int):
+        return str(e)
+    hr = args[0]
+    excepinfo = args[2] if len(args) > 2 else None
+    text = "COM error " + hresult_name(hr)
+    if excepinfo:
+        _, source, description, _, _, scode = (tuple(excepinfo) + (None,) * 6)[:6]
+        if scode and (scode & 0xFFFFFFFF) != (hr & 0xFFFFFFFF):
+            text += " — inner " + hresult_name(scode)
+        if description and description.strip():
+            text += f" — {source + ': ' if source else ''}{description.strip()}"
+    if len(args) > 3 and args[3] is not None:
+        text += f" (argument {args[3]})"
+    return text
+
+
+def inventor_messages(app) -> str:
+    """Inventor's own error/warning text (ErrorManager), best effort. It can hold messages
+    of earlier operations too."""
+    try:
+        em = app.ErrorManager
+        if not (em.HasErrors or em.HasWarnings):
+            return ""
+        msg = (em.AllMessages or em.LastMessage or "").strip()
+    except Exception:
+        return ""
+    return msg if len(msg) <= 800 else "…" + msg[-800:]
+
+
+# HealthStatusEnum — read from the type library at runtime (health_name); this is the
+# fallback when that fails (values of the 2022–2025 API reference).
+HEALTH_FALLBACK = {
+    11777: "kUnknownHealth", 11778: "kUpToDateHealth", 11779: "kOutOfDateHealth",
+    11780: "kDriverLostHealth", 11781: "kInErrorHealth", 11782: "kDeletedHealth",
+    11783: "kCannotComputeHealth", 11784: "kSuppressedHealth", 11785: "kBeyondStopNodeHealth",
+    11786: "kInconsistentHealth", 11787: "kRedundantHealth", 11788: "kNewlyAddedHealth",
+    11789: "kInvalidLimitsHealth", 11790: "kJointDOFLockedHealth",
+}
+_typelib_enums: dict[str, dict[int, str]] = {}
+
+
+def typelib_enum(app, name: str) -> dict[int, str]:
+    """{value: member name} of an enum in Inventor's type library ({} if it can't be read).
+    Read through the Application's type info — no gen_py cache involved."""
+    if name in _typelib_enums:
+        return _typelib_enums[name]
+    found: dict[int, str] = {}
+    try:
+        tlib = app._oleobj_.GetTypeInfo().GetContainingTypeLib()[0]
+        for i in range(tlib.GetTypeInfoCount()):
+            if tlib.GetDocumentation(i)[0] != name:
+                continue
+            ti = tlib.GetTypeInfo(i)
+            for j in range(ti.GetTypeAttr().cVars):
+                vd = ti.GetVarDesc(j)
+                found[int(vd.value)] = ti.GetNames(vd.memid)[0]
+            break
+    except Exception:
+        found = {}
+    if found:
+        _typelib_enums[name] = found
+    return found
+
+
+def health_name(app, value) -> str:
+    """'kInErrorHealth' for 11781 — the name of a HealthStatusEnum value."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return (typelib_enum(app, "HealthStatusEnum") or HEALTH_FALLBACK).get(value) or str(value)
+
+
+def unhealthy(app, obj) -> str:
+    """The health of a feature / constraint when it is not fine (up to date or
+    suppressed), else ''."""
+    try:
+        name = health_name(app, obj.HealthStatus)
+    except Exception:
+        return ""
+    return "" if name in ("kUpToDateHealth", "kSuppressedHealth") else name
+
 
 def modal_dialogs(main_hwnd) -> list[dict]:
     """Modal dialogs Inventor is showing, read from the window list — no COM call,
@@ -399,24 +527,117 @@ class InventorConnection:
             os.remove(path)
         return False
 
-    def save_document(self, path: str | None = None, overwrite: bool = False) -> str:
-        """Save the active document without any dialog.
+    def library_folders(self) -> list[str]:
+        """Folders whose files are never saved: the active project's library paths and
+        Content Center files folder, and the application's Content Center files folder.
+        Relative project paths are relative to the .ipj's folder."""
+        folders, base = [], ""
+
+        def add(p):
+            if p and p.strip():
+                folders.append(os.path.normcase(os.path.abspath(
+                    os.path.join(base, os.path.expandvars(p.strip())))))
+        try:
+            proj = self.app.DesignProjectManager.ActiveDesignProject
+            base = os.path.dirname(proj.FullFileName)
+        except Exception:
+            proj = None
+        if proj is not None:
+            try:
+                paths = proj.LibraryPaths
+                for i in range(1, paths.Count + 1):
+                    add(paths.Item(i).Path)
+            except Exception:
+                pass
+            try:
+                add(proj.ContentCenterPath)
+            except Exception:
+                pass
+        try:
+            add(self.app.FileOptions.ContentCenterPath)
+        except Exception:
+            pass
+        return folders
+
+    @staticmethod
+    def _library_reason(doc, folders, members: bool = True) -> str:
+        """Why doc must not be saved ('' if it may be): a file in a library / Content Center
+        folder, or (members=True) any Content Center member — custom-length ones included,
+        which only Content Center itself should rewrite."""
+        if members:
+            try:
+                if doc.ComponentDefinition.IsContentMember:
+                    return "Content Center member"
+            except Exception:
+                pass
+        name = os.path.normcase(os.path.abspath(doc.FullFileName)) if doc.FullFileName else ""
+        for f in folders:
+            if name and (name == f or name.startswith(f.rstrip("\\/") + os.sep)):
+                return "library / Content Center folder"
+        return ""
+
+    def save_document(self, path: str | None = None, overwrite: bool = False,
+                      save_dependents: bool = True) -> str:
+        """Save the active document without any dialog — and never a library or Content
+        Center file.
 
         Plain Document.Save() opens a modal 'save changes to dependents?' dialog
         whenever a referenced file was updated (e.g. an assembly whose
         sub-assembly re-evaluated), and the API call waits until a user answers.
-        Save2(True) saves the dirty dependents too, under SilentOperation.
+        Save2(True) would answer it by saving EVERY dirty dependent — including
+        standard Content Center parts Inventor marked dirty on opening an old assembly.
+        So each dirty dependent outside the library folders is saved on its own with
+        Save2(False), then the document itself with Save2(False); library files stay
+        unsaved (Inventor recomputes them when it opens them again). Save2(True, list)
+        would do the same in one call, but one failing file would fail them all.
         """
         doc = self.active_document()
-        if path:
-            path = os.path.abspath(path)
-            if not self._check_save_path(doc, path, overwrite):
-                self._silently(lambda: doc.SaveAs(path, False))
-                return f"Saved as: {path}"
-        dirty = [d.DisplayName for d in doc.AllReferencedDocuments if d.Dirty]
-        self._silently(lambda: doc.Save2(True))
-        extra = f" (+ {len(dirty)} dependent(s): {', '.join(dirty)})" if dirty else ""
-        return f"Saved: {doc.FullFileName}{extra}"
+        folders = self.library_folders()
+        reason = self._library_reason(doc, folders, members=False)  # a custom member may be saved on purpose
+        if reason:
+            raise RuntimeError(f"{doc.DisplayName} is a library file ({reason}: {doc.FullFileName}) — "
+                               "it is not saved. Save a copy elsewhere with save_document(path) if you "
+                               "really changed it.")
+        target = os.path.abspath(path) if path else None
+        if target:
+            name = os.path.normcase(target)
+            if any(name.startswith(f.rstrip("\\/") + os.sep) for f in folders):
+                raise RuntimeError(f"{target} is in a library / Content Center folder — save it elsewhere")
+            if self._check_save_path(doc, target, overwrite):
+                target = None  # its own file: save in place
+        saved, skipped, failed = [], [], []
+        if save_dependents:
+            for d in doc.AllReferencedDocuments:
+                if not d.Dirty:
+                    continue
+                why = self._library_reason(d, folders) or ("" if d.FullFileName else "never saved")
+                if why:
+                    skipped.append(f"{d.DisplayName} ({why})")
+                    continue
+                try:
+                    self._silently(lambda: d.Save2(False))
+                    saved.append(d.FullFileName)
+                except Exception as e:
+                    failed.append(f"{d.DisplayName}: {describe_com_error(e)}")
+        if target:
+            self._silently(lambda: doc.SaveAs(target, False))
+            saved.insert(0, target)
+            msg = f"Saved as: {target}"
+        else:
+            self._silently(lambda: doc.Save2(False))
+            saved.insert(0, doc.FullFileName)
+            msg = f"Saved: {doc.FullFileName}"
+        if len(saved) > 1:
+            msg += f"\nDependents saved ({len(saved) - 1}): " + ", ".join(saved[1:])
+        if skipped:
+            msg += f"\nNot saved ({len(skipped)}, library or new): " + ", ".join(skipped)
+        if failed:
+            msg += f"\nFailed ({len(failed)}): " + "; ".join(failed)
+        if not save_dependents:
+            dirty = [d.DisplayName for d in doc.AllReferencedDocuments if d.Dirty]
+            if dirty:
+                msg += f"\nDependents left unsaved (save_dependents=False): {', '.join(dirty)}"
+        return msg
 
     def unsaved_documents(self) -> list[str]:
         """Names of open documents that were never saved to disk."""
@@ -1054,6 +1275,9 @@ class InventorConnection:
             nm = f.Name
             if getattr(f, "Suppressed", False):
                 nm += " [suppressed]"
+            health = unhealthy(self.app, f)
+            if health:
+                nm += f" [{health}]"
             feats.append(f"[{i}] {nm}")
         info["features"] = feats
         info["sketches"] = [comp.Sketches.Item(i).Name for i in range(1, comp.Sketches.Count + 1)]
@@ -1087,8 +1311,8 @@ class InventorConnection:
     def list_faces(self, body_index: int = 1, min_area: float = 0, max_count: int = 60) -> str:
         """Compact face table: '[i] Plane A=90000 c=(0.0,225.0,12.5)' one per line.
         min_area in mm²."""
-        type_names = {5890: "Plane", 5891: "Cyl", 5892: "Cone", 5893: "Cone",
-                      5894: "Sphere", 5895: "Torus"}
+        type_names = {5890: "Plane", 5891: "Cyl", 5892: "EllCyl", 5893: "Cone",
+                      5894: "EllCone", 5895: "Torus", 5896: "Sphere", 5897: "BSpline"}
         body = self.active_part().SurfaceBodies.Item(body_index)
         lines = []
         for i in range(1, body.Faces.Count + 1):
@@ -1387,6 +1611,9 @@ class InventorConnection:
                 "type": str(f.Type),
                 "suppressed": f.Suppressed if hasattr(f, "Suppressed") else False,
             })
+            health = unhealthy(self.app, f)
+            if health:
+                result[-1]["health"] = health
         return result
 
     def delete_feature(self, indices: list[int]) -> str:
@@ -1711,7 +1938,8 @@ class InventorConnection:
         Useful for: finding a panel face to sketch on for sheet metal Cut.
         Centroid is computed as the average of the face's vertices.
 
-        surface_type: 5890=Plane (default), 5891=Cylinder, 5892=Cone, 5893=Sphere, 5894=Torus
+        surface_type: 5890=Plane (default), 5891=Cylinder, 5893=Cone, 5895=Torus, 5896=Sphere
+                      (SURFACE_TYPES has them all)
         min_area: filter out small auxiliary faces (mm²)
         tolerance: how close the centroid must be (mm)
         """
@@ -2820,7 +3048,9 @@ class InventorConnection:
         lines = []
         for i in range(1, comp.Constraints.Count + 1):
             c = comp.Constraints.Item(i)
-            lines.append(f"[{i}] {c.Name}" + (" (suppressed)" if c.Suppressed else ""))
+            health = unhealthy(self.app, c)
+            lines.append(f"[{i}] {c.Name}" + (" (suppressed)" if c.Suppressed else "")
+                         + (f" [{health}]" if health else ""))
         return "\n".join(lines) if lines else "(no constraints)"
 
     def delete_constraint(self, index: int) -> str:

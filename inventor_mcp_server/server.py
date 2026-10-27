@@ -2,6 +2,7 @@
 
 import asyncio
 import concurrent.futures
+import ctypes
 import functools
 import inspect as _inspect  # `inspect` is a tool name below
 import json
@@ -70,6 +71,29 @@ class _ThreadStdout:
         return getattr(self.default, name)
 
 
+class _LiveOutput:
+    """execute_python's output buffer. Each write lands at once — nothing is held back
+    until the call ends — so call_status shows the prints of code that is still running.
+    No lock: list.append and "".join are atomic under the GIL, and a lock held by the
+    Inventor thread could be left locked by cancel_call's KeyboardInterrupt."""
+
+    def __init__(self):
+        self.parts = []
+
+    def write(self, s):
+        self.parts.append(s)
+        return len(s)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def getvalue(self):
+        return "".join(self.parts)
+
+
 # ---------- Inventor instances and their call threads ----------
 #
 # One server can drive several Inventors at once — Claude Desktop runs a single server
@@ -87,17 +111,27 @@ class _ThreadStdout:
 # (connect(new_instance=True)) — it keeps the reference.
 
 CALL_TIMEOUT = float(os.environ.get("INVENTOR_MCP_CALL_TIMEOUT", "50"))
+STATUS_WAIT_MAX = min(45.0, CALL_TIMEOUT)  # call_status(wait_seconds) — below client timeouts
 DEFAULT = "default"
-_local = threading.local()  # .instance on each Inventor thread
+_local = threading.local()  # .instance and .call on each Inventor thread
 
 
 class _Call:
-    def __init__(self, name, future):
-        self.name, self.future = name, future
+    def __init__(self, name):
+        self.name, self.future = name, None
         self.started, self.finished = time.monotonic(), None
         self.timed_out = False      # outlived CALL_TIMEOUT: the client never saw the result
         self.collected = False      # call_status has returned the result
-        future.add_done_callback(lambda _: setattr(self, "finished", time.monotonic()))
+        self.cancel = threading.Event()  # cancel_call: cancelled() turns True
+        self.cancelled_by = ""      # "cancel_call" or "timeout …"
+        self.interrupted = False    # cancel_call raised KeyboardInterrupt in it (once at most)
+        self.progress = None        # (time, text) of execute_python's last progress()
+        self.output = None          # execute_python's _LiveOutput
+
+    def submit(self, inst, fn, args, kwargs):
+        self.future = inst.thread.submit(_run_call, inst, self, fn, args, kwargs)
+        self.future.add_done_callback(lambda _: setattr(self, "finished", time.monotonic()))
+        return self
 
 
 class _Instance:
@@ -106,8 +140,11 @@ class _Instance:
         self.conn = _api.InventorConnection()
         self.ns: dict = {}              # execute_python's namespace (variables persist)
         self.ns_created = time.time()
-        self.output = None              # stdout buffer of the execute_python call in progress
         self.last_call: _Call | None = None
+        self.running: _Call | None = None    # set by the Inventor thread while a call runs
+        self.raising = False            # cancel_call is about to interrupt (see _interrupt)
+        self.cancel_lock = threading.Lock()
+        self.thread_id = None
         self.project = ""               # active .ipj when last seen
         self.libraries: list[str] = []  # load_library files, rerun in a new namespace
         self.ns_ready = False           # startup file and libraries loaded
@@ -118,6 +155,7 @@ class _Instance:
     def _init_thread(self):
         pythoncom.CoInitialize()
         _local.instance = self
+        self.thread_id = threading.get_ident()
 
     @property
     def attached(self) -> bool:
@@ -173,8 +211,31 @@ def _dialog_report(inst: _Instance) -> str:
 
 def _busy_report(inst: _Instance, call: _Call) -> str:
     msg = f"'{call.name}' has been running for {time.monotonic() - call.started:.0f} s."
+    if call.cancel.is_set():
+        msg += " Cancel was requested — it stops at its next Python line (not inside a COM call)."
     return msg + "\n" + (_dialog_report(inst) or
                          "No dialog is open — Inventor is still working on it (a long operation).")
+
+
+def _tail(text: str, limit: int = 3000) -> str:
+    """The last lines of text, at most limit characters, cut at a line start."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    return "…" + (cut[cut.find("\n") + 1:] if "\n" in cut else cut)
+
+
+def _live_report(call: _Call) -> str:
+    """progress() line and the latest output of a running execute_python call."""
+    lines = []
+    if call.progress:
+        t, text = call.progress
+        lines.append(f"Progress: {text} ({time.monotonic() - t:.0f} s ago)")
+    out = call.output.getvalue().strip() if call.output is not None else ""
+    if out:
+        lines.append(f"Latest output ({out.count(chr(10)) + 1} lines so far):\n{_tail(out)}")
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 
 def _silent_call(fn, args, kwargs):
@@ -198,23 +259,108 @@ def _silent_call(fn, args, kwargs):
                 pass
 
 
+# ---------- Cancelling a call ----------
+#
+# cancel_call sets the call's cancel event (execute_python code polls cancelled()) and
+# raises KeyboardInterrupt in the Inventor thread with PyThreadState_SetAsyncExc. Python
+# delivers it at the thread's next bytecode — never inside a blocking COM call, which has
+# to return first. It must never land after the call ended: in the executor's loop it
+# would kill the thread and lose the next call. So it is only raised while inst.running
+# is the call, and the Inventor thread, on leaving the call, clears inst.running, waits
+# for a cancel that is raising right now (inst.raising — the two flags are set and read
+# in opposite order, so one side always sees the other) and clears whatever is pending.
+# The Inventor thread takes no lock for this: the exception could land while it holds it.
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _set_async_exc(thread_id, exc) -> int:
+    return ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(thread_id), ctypes.py_object(exc) if exc is not None else None)
+
+
+def _interrupt(inst: _Instance, call: _Call) -> bool:
+    """Raise KeyboardInterrupt in the call, if it is still running. Any thread."""
+    with inst.cancel_lock:
+        inst.raising = True
+        try:
+            if inst.running is call and not call.interrupted and inst.thread_id:
+                call.interrupted = True
+                return _set_async_exc(inst.thread_id, KeyboardInterrupt) == 1
+            return False
+        finally:
+            inst.raising = False
+
+
+def _disarm(inst: _Instance):
+    """On the Inventor thread when a call ends: no KeyboardInterrupt may follow it."""
+    inst.running = None
+    while inst.raising:
+        time.sleep(0.001)
+    _set_async_exc(inst.thread_id, None)
+
+
+def _cancel(inst: _Instance, call: _Call, by: str = "cancel_call") -> bool:
+    call.cancelled_by = call.cancelled_by or by
+    call.cancel.set()
+    return _interrupt(inst, call)
+
+
+def _error_notes(e: BaseException) -> str:
+    """Readable lines for the COM errors in e's chain (HRESULT names, the inner scode of
+    DISP_E_EXCEPTION) and Inventor's own error message. On the Inventor thread."""
+    lines, x = [], e
+    for _ in range(5):
+        if x is None:
+            break
+        if type(x).__name__ == "com_error":
+            lines.append("→ " + _api.describe_com_error(x))
+        x = x.__cause__ or x.__context__
+    if lines:
+        app = getattr(getattr(_local, "instance", None), "conn", None)
+        said = _api.inventor_messages(app._app) if app is not None and app._app is not None else ""
+        if said:
+            lines.append("→ Inventor says: " + said)
+    return "\n".join(lines)
+
+
+def _run_call(inst: _Instance, call: _Call, fn, args, kwargs):
+    """The call on the Inventor thread: silent, cancellable, COM errors made readable."""
+    try:
+        inst.running, _local.call = call, call
+        try:
+            return _silent_call(fn, args, kwargs)
+        finally:
+            _disarm(inst)
+    except KeyboardInterrupt:
+        raise _Cancelled(f"'{call.name}' was cancelled after {time.monotonic() - call.started:.0f} s.") from None
+    except Exception as e:
+        notes = _error_notes(e)
+        if not notes:
+            raise
+        head = "" if type(e).__name__ == "com_error" else f"{type(e).__name__}: {e}\n"
+        raise RuntimeError(head + notes.replace("→ ", "")) from None
+
+
 def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
     with inst.lock:
         c = inst.last_call
         if c is not None and not c.future.done():
             return (_busy_report(inst, c) + f"\nThis '{fn.__name__}' call was NOT started. "
-                    "Use call_status to follow the running call.")
+                    "Use call_status to follow the running call (cancel_call stops it).")
         blocker = _dialog_report(inst)
         if blocker:
             return blocker + f"\nThis '{fn.__name__}' call was NOT started. Retry once the dialog is closed."
-        call = _Call(fn.__name__, inst.thread.submit(_silent_call, fn, args, kwargs))
+        call = _Call(fn.__name__).submit(inst, fn, args, kwargs)
         inst.last_call = call
     try:
         return call.future.result(timeout=CALL_TIMEOUT if wait is None else wait)
     except concurrent.futures.TimeoutError:
         call.timed_out = True
-        return (_busy_report(inst, call) + "\nIt keeps running in the background — "
-                "call call_status to follow it and get its result.")
+        return (_busy_report(inst, call) + _live_report(call) + "\nIt keeps running in the background — "
+                "call_status(wait_seconds=30) follows it and gets its result; cancel_call stops it.")
 
 
 Instance = Annotated[str, Field(
@@ -252,8 +398,7 @@ def _call_status(inst: _Instance) -> str:
     if c is None:
         return "No Inventor call has been made yet."
     if not c.future.done():
-        out = inst.output.getvalue().strip() if c.name == "execute_python" and inst.output else ""
-        return _busy_report(inst, c) + (f"\nOutput so far:\n{out[-3000:]}" if out else "")
+        return _busy_report(inst, c) + _live_report(c)
     took = f"{c.finished - c.started:.0f} s"
     if not c.timed_out or c.collected:
         return f"Last call '{c.name}' finished ({took}); its result was already returned."
@@ -266,16 +411,55 @@ def _call_status(inst: _Instance) -> str:
 
 
 @tool(com=False)
-def call_status(instance: Instance = "") -> str:
+async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
     """Follow a call that outlived the wait (a long job, or one stuck behind an Inventor
-    dialog): elapsed time, any open dialog's text, execute_python output so far — and
-    the call's result once it has finished. Safe to call at any time."""
+    dialog): elapsed time, any open dialog's text, execute_python's progress() line and
+    latest output — and the call's result once it has finished. Safe to call at any time.
+
+    Args:
+        wait_seconds: Wait up to this long (at most 45 s) for the running call to finish
+            and return its result at once — instead of calling call_status again and again.
+            Without a name, waits until the first of the running calls finishes.
+    """
     if instance or sum(i.attached for i in _instances.values()) <= 1:
         try:
-            return _call_status(_pick(instance))
+            insts, single = [_pick(instance)], True
         except _NoInstance as e:
             return str(e)
-    return "\n\n".join(f"[{i.name}] {_call_status(i)}" for i in _instances.values() if i.attached)
+    else:
+        insts, single = [i for i in _instances.values() if i.attached], False
+    wait = min(max(float(wait_seconds or 0), 0.0), STATUS_WAIT_MAX)
+    running = [i.last_call.future for i in insts if i.last_call is not None and not i.last_call.future.done()]
+    if wait and running:  # in a worker thread: the event loop keeps serving other agents
+        await asyncio.to_thread(concurrent.futures.wait, running, wait,
+                                concurrent.futures.FIRST_COMPLETED)
+    if single:
+        return _call_status(insts[0])
+    return "\n\n".join(f"[{i.name}] {_call_status(i)}" for i in insts)
+
+
+@tool(com=False)
+async def cancel_call(instance: Instance = "") -> str:
+    """Stop the running call — a long execute_python loop, a Content Center scan, a job
+    that turned out wrong. cancelled() in execute_python code turns True (poll it in long
+    loops to stop cleanly), and a KeyboardInterrupt is raised in the Inventor thread.
+    It takes effect at the next Python line: a call stuck INSIDE one COM call (a long
+    Inventor operation, or a modal dialog) stops only once that call returns."""
+    try:
+        inst = _pick(instance)
+    except _NoInstance as e:
+        return str(e)
+    c = inst.last_call
+    if c is None or c.future.done():
+        return f"Nothing is running on Inventor '{inst.name}'."
+    await asyncio.to_thread(_cancel, inst, c)
+    await asyncio.to_thread(concurrent.futures.wait, [c.future], 3)
+    if not c.future.done():
+        return (_busy_report(inst, c) + "\nIt is inside a COM call (or behind a dialog) and stops once "
+                "that returns — follow it with call_status(wait_seconds=30).")
+    if c.timed_out:
+        return _call_status(inst)
+    return f"'{c.name}' stopped after {c.finished - c.started:.0f} s; the waiting call got its result."
 
 
 # ---------- Power tools (token savers) ----------
@@ -315,7 +499,13 @@ def _user_traceback(e: BaseException) -> str:
     t = tb
     while t is not None and not _is_user_file(t.tb_frame.f_code.co_filename):
         t = t.tb_next
-    return "".join(traceback.format_exception(type(e), e, t or tb))
+    notes = _error_notes(e)
+    return "".join(traceback.format_exception(type(e), e, t or tb)) + (notes + "\n" if notes else "")
+
+
+def _user_frames(e: BaseException):
+    """The traceback entries of the agent's own code."""
+    return [f for f in traceback.extract_tb(e.__traceback__) if _is_user_file(f.filename)]
 
 
 def _is_user_file(name: str) -> bool:
@@ -338,9 +528,22 @@ def _load_libraries(me) -> str:
     return "\n".join(notes)
 
 
+def _progress(msg) -> None:
+    """execute_python: a short status line call_status shows while the code runs."""
+    call = getattr(_local, "call", None)
+    if call is not None:
+        call.progress = (time.monotonic(), str(msg)[:200])
+
+
+def _cancelled() -> bool:
+    """execute_python: True once cancel_call (or the timeout) asked this call to stop."""
+    call = getattr(_local, "call", None)
+    return call is not None and call.cancel.is_set()
+
+
 def _bind(me) -> str | None:
     """Fresh inv/app/doc/comp/body/tg in the namespace. Returns an error to show, if any."""
-    ctx = {"inv": me.conn, "math": math}
+    ctx = {"inv": me.conn, "math": math, "progress": _progress, "cancelled": _cancelled}
     try:
         # only the default reconnects by itself: a named Inventor that was closed must not
         # silently become whichever Inventor Windows hands out first
@@ -365,7 +568,7 @@ def _bind(me) -> str | None:
 
 
 @tool()
-def execute_python(code: str, undo_on_error: bool = False) -> str:
+def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -> str:
     """Execute Python code against the live Inventor connection.
 
     Pre-bound objects (re-resolved fresh on every call):
@@ -374,6 +577,8 @@ def execute_python(code: str, undo_on_error: bool = False) -> str:
       doc  — active document          comp — its ComponentDefinition
       body — comp.SurfaceBodies.Item(1) (or None)
       tg   — TransientGeometry        math — math module
+      progress(msg) — status line call_status shows while a long job runs
+      cancelled()   — True once cancel_call asked to stop: poll it in long loops
     Variables you assign persist between calls until the server restarts or reload_api
     runs — status shows the namespace's age and names. Each connected Inventor has its
     own namespace. Helpers you need every time: put them in a file and load_library it
@@ -382,23 +587,28 @@ def execute_python(code: str, undo_on_error: bool = False) -> str:
     Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
     directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
     Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
-    a dialog. A call longer than the wait limit keeps running; follow it with call_status.
+    a dialog. A call longer than the wait limit keeps running; follow it with
+    call_status(wait_seconds=30), which shows the prints so far; cancel_call stops it.
     Returns captured stdout + stderr (print your results!), or the traceback from your
-    own code down on error.
+    own code down on error (COM errors named: E_INVALIDARG, RPC_E_DISCONNECTED …).
 
     Args:
         code: Python source.
         undo_on_error: Run inside one undo transaction on the active document and roll
             it back if the code raises — no half-built sketches or work planes left behind.
+        timeout: Seconds; cancel the run after this long, as cancel_call would (0 = none).
     """
-    import io
-    me = _local.instance
+    me, call = _local.instance, _local.call
     error = _bind(me)
     if error:
         return error
-    buf = me.output = io.StringIO()
+    buf = call.output = _LiveOutput()
     _capture(buf)
-    txn = None
+    txn = timer = None
+    if timeout and timeout > 0:
+        timer = threading.Timer(timeout, _cancel, (me, call, f"timeout {timeout:g} s"))
+        timer.daemon = True
+        timer.start()
     try:
         notes = _load_libraries(me)
         if notes:
@@ -406,21 +616,32 @@ def execute_python(code: str, undo_on_error: bool = False) -> str:
         if undo_on_error and me.ns.get("doc") is not None:
             txn = inv.app.TransactionManager.StartTransaction(me.ns["doc"], "MCP execute_python")
         try:
-            inv._silently(lambda: _run_source(me, code))
-        except Exception as e:
+            try:
+                inv._silently(lambda: _run_source(me, code))
+            finally:
+                _disarm(me)  # a cancel arriving now must not hit the code below
+        except (Exception, KeyboardInterrupt) as e:
             if txn is not None:
                 txn.Abort()
                 txn = None
                 print("(undo_on_error: every change of this call was rolled back)", file=sys.stderr)
             partial = buf.getvalue().strip()
+            if isinstance(e, KeyboardInterrupt):
+                return (partial + "\n" if partial else "") + (
+                    f"CANCELLED ({call.cancelled_by or 'interrupted'}) after {time.monotonic() - call.started:.0f} s at:\n"
+                    + "".join(traceback.format_list(_user_frames(e))[-3:]))
             return (partial + "\n" if partial else "") + "ERROR:\n" + _user_traceback(e)
         if txn is not None:
             txn.End()
         out = buf.getvalue().strip()
         if len(out) > 6000:
             out = out[:6000] + "\n... (truncated at 6000 chars)"
-        return out if out else "(ok, no output)"
+        if call.cancel.is_set():
+            out += f"\n(stopped early: {call.cancelled_by} asked it to, cancelled() was True)"
+        return out.strip() if out.strip() else "(ok, no output)"
     finally:
+        if timer is not None:
+            timer.cancel()
         _release()
 
 
@@ -431,7 +652,6 @@ def load_library(path: str) -> str:
     and cached objects (Content Center families…) you would otherwise redefine every time.
     A file at ~/.inventor-mcp/startup.py (or INVENTOR_MCP_STARTUP) is loaded the same way
     for every Inventor."""
-    import io
     me = _local.instance
     path = os.path.abspath(path)
     if not os.path.isfile(path):
@@ -440,7 +660,7 @@ def load_library(path: str) -> str:
     if error:
         return error
     before = set(me.ns)
-    buf = me.output = io.StringIO()
+    buf = _local.call.output = _LiveOutput()
     _capture(buf)
     try:
         _load_libraries(me)
@@ -713,7 +933,8 @@ def status() -> str:
         info = {"document": None}
     info["inventor"] = {"instance": me.name, "pid": inv.pid, "project": inv.project_info()["name"]}
     defined = sorted(k for k in me.ns
-                     if not k.startswith("__") and k not in ("inv", "app", "doc", "comp", "body", "tg", "math"))
+                     if not k.startswith("__") and k not in ("inv", "app", "doc", "comp", "body", "tg", "math",
+                                                             "progress", "cancelled"))
     info["python_namespace"] = {
         "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(me.ns_created)),
         "names": defined,
@@ -740,18 +961,23 @@ def create_part(name: str = "", template: str = "metric") -> str:
 
 
 @tool()
-def save_document(path: str = "", overwrite: bool = False) -> str:
-    """Save the active document — never opens a dialog. Saving in place also saves
-    dependents that changed (e.g. sub-assemblies), which would otherwise trigger
-    Inventor's modal 'save dependents?' prompt and block until a user clicks OK.
+def save_document(path: str = "", overwrite: bool = False, save_dependents: bool = True) -> str:
+    """Save the active document — never opens a dialog, and never writes a library or
+    Content Center file. Dependents that changed (e.g. sub-assemblies, edited parts) are
+    saved one by one first, except files in the project's library paths or Content Center
+    folders and Content Center members: Inventor marks standard parts dirty after opening
+    an old assembly, and re-saving them would rewrite shared library files. Returns the
+    files saved and the ones skipped.
     The path is checked first (characters, extension, an existing file) so a bad one
     gets a clear message instead of Inventor's E_INVALIDARG.
 
     Args:
         path: Full file path to save as (e.g. "D:/parts/flange.ipt"). If empty, saves in place.
         overwrite: Replace a file that already exists at path (not one open in Inventor).
+        save_dependents: False = save only this document (Save2(False)); changed
+            dependents stay unsaved and are listed.
     """
-    return inv.save_document(path or None, overwrite)
+    return inv.save_document(path or None, overwrite, save_dependents)
 
 
 @tool()
