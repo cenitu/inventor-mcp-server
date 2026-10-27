@@ -73,6 +73,7 @@ import threading, time
 srv = pkg
 srv.CALL_TIMEOUT = 0.5
 gate = threading.Event()
+A = srv._instances[srv.DEFAULT]
 
 
 def slow_job():
@@ -84,21 +85,67 @@ def quick_job():
     return threading.current_thread().name
 
 
-out = srv._on_com_thread(quick_job, (), {})
-check("calls run on the Inventor thread", out.startswith("inventor-com"), out)
-out = srv._on_com_thread(slow_job, (), {})
+def wait_done(inst):
+    for _ in range(50):
+        if inst.last_call.future.done():
+            return
+        time.sleep(0.05)
+
+
+out = srv._on_com_thread(A, quick_job, (), {})
+check("calls run on the Inventor thread", out.startswith("inventor-default"), out)
+out = srv._on_com_thread(A, slow_job, (), {})
 check("a long call returns before the client times out", "keeps running" in out, out.splitlines()[0])
-out = srv._on_com_thread(quick_job, (), {})
+out = srv._on_com_thread(A, quick_job, (), {})
 check("the next call is refused while one is running", "NOT started" in out)
 check("call_status reports the running call", "running for" in srv.call_status())
 gate.set()
-for _ in range(50):
-    if srv._last_call.future.done():
-        break
-    time.sleep(0.05)
+wait_done(A)
 out = srv.call_status()
 check("call_status returns the result once finished", "slow job done" in out, out.splitlines()[0])
 check("…only once", "already returned" in srv.call_status())
+
+print("Several Inventors (no Inventor needed):")
+com_tools = [t for t in pkg_tools if t.name not in ("call_status", "list_instances")]
+no_inst = [t.name for t in com_tools if "instance" not in (getattr(t, "input_schema", None) or t.inputSchema)["properties"]]
+check("every Inventor tool takes an instance parameter", not no_inst, ", ".join(no_inst))
+B = srv._instances.setdefault("second", srv._Instance("second"))
+check("one connected Inventor needs no instance name", srv._pick("") is A)
+A.conn._app = B.conn._app = object()  # pretend both are connected
+try:
+    srv._pick("")
+    check("an unnamed call is refused when several are connected", False)
+except srv._NoInstance as e:
+    check("an unnamed call is refused when several are connected", "default, second" in str(e), str(e))
+check("an unknown name is refused",
+      "No Inventor is connected as 'x'" in asyncio.run(srv.tool()(quick_job)(instance="x")))
+gate.clear()
+srv._on_com_thread(A, slow_job, (), {})
+out = srv._on_com_thread(B, quick_job, (), {})
+check("a busy Inventor doesn't hold up the other one", out.startswith("inventor-second"), out)
+check("call_status without a name reports every Inventor",
+      "[default]" in srv.call_status() and "[second]" in srv.call_status())
+gate.set()
+wait_done(A)
+srv._on_com_thread(A, lambda: A.ns.update(x=1), (), {})
+check("each Inventor has its own execute_python namespace", "x" in A.ns and "x" not in B.ns)
+
+
+async def two_clients():  # a slow call on A must not hold up B at the server level either
+    slow, quick = srv.tool()(slow_job), srv.tool()(quick_job)
+    gate.clear()
+    t = time.monotonic()
+    a = asyncio.create_task(slow(instance="default"))
+    b = await quick(instance="second")
+    took = time.monotonic() - t
+    gate.set()
+    await a
+    return b, took
+b, took = asyncio.run(two_clients())
+check("the server answers one agent while another's call runs",
+      b.startswith("inventor-second") and took < 0.4, f"{took:.2f} s")
+A.conn._app = None
+del srv._instances["second"]
 
 import io
 default, captured = io.StringIO(), io.StringIO()

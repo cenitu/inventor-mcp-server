@@ -4,6 +4,7 @@ import os
 import win32com.client
 import win32com.client.gencache
 import pythoncom
+import win32process
 
 # Never wrap COM objects in makepy (gen_py) classes, even when a cache exists. Something
 # else on the machine — a script calling CastTo or gencache.EnsureDispatch — creates one
@@ -76,6 +77,14 @@ def modal_dialogs(main_hwnd) -> list[dict]:
     return dialogs
 
 
+def inventor_pids() -> list[int]:
+    """Process ids of every running Inventor."""
+    import subprocess
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Inventor.exe", "/FO", "CSV", "/NH"],
+                         capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    return [int(row.split('","')[1]) for row in out.splitlines() if row.startswith('"Inventor.exe"')]
+
+
 class InventorConnection:
     def __init__(self):
         self._app = None
@@ -89,14 +98,16 @@ class InventorConnection:
             )
         return self._app
 
-    def connect(self, visible: bool = True) -> str:
+    def connect(self, visible: bool = True, new_instance: bool = False) -> str:
         pythoncom.CoInitialize()
         try:
+            if new_instance:
+                raise LookupError  # DispatchEx always starts a separate Inventor
             self._app = win32com.client.GetActiveObject("Inventor.Application")
             msg = f"Connected to running Inventor {self._app.SoftwareVersion.DisplayVersion}"
         except Exception:
             try:
-                self._app = win32com.client.Dispatch("Inventor.Application")
+                self._app = win32com.client.DispatchEx("Inventor.Application")
                 self._app.Visible = visible
                 msg = f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
             except Exception as e:
@@ -106,6 +117,37 @@ class InventorConnection:
         except Exception:
             self.main_hwnd = None
         return msg
+
+    @property
+    def pid(self) -> int | None:
+        """Inventor's process id — from the main window, so no COM call (any thread)."""
+        try:
+            return win32process.GetWindowThreadProcessId(self.main_hwnd)[1] if self.main_hwnd else None
+        except Exception:
+            return None
+
+    def project_info(self) -> dict:
+        p = self.app.DesignProjectManager.ActiveDesignProject
+        return {"name": p.Name, "path": p.FullFileName}
+
+    def activate_project(self, path: str) -> str:
+        """Make an .ipj the active project. Inventor refuses while documents are open."""
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Project file not found: {path}")
+        pm = self.app.DesignProjectManager
+        same = lambda p: os.path.normcase(p.FullFileName) == os.path.normcase(path)
+        if same(pm.ActiveDesignProject):
+            return f"Project {pm.ActiveDesignProject.Name} is already active."
+        if self.app.Documents.Count:
+            raise RuntimeError("Inventor only switches projects with no documents open — close them "
+                               "first, or connect(new_instance=True, project=...) for a separate Inventor.")
+        projects = pm.DesignProjects
+        proj = next((p for p in (projects.Item(i) for i in range(1, projects.Count + 1)) if same(p)), None)
+        if proj is None:
+            proj = projects.AddExisting(path)
+        proj.Activate(False)  # False: this session only, the default project stays the user's
+        return f"Project {proj.Name} is active."
 
     def is_connected(self) -> bool:
         if self._app is None:

@@ -97,6 +97,19 @@ around every call. A modal dialog disables Inventor's main window (`app.MainFram
 call is diagnosable without COM: the dialog is a visible, enabled top-level window of the same
 process (`win32gui.EnumWindows`), and its child windows carry the message text.
 
+## Several Inventor processes
+
+Each Inventor registers itself in the Running Object Table under the same moniker
+(`!{B6B5DC40-96E3-11D2-B774-0060B0F159EF}`). `GetActiveObject("Inventor.Application")` — and even
+walking the ROT and binding each entry — returns the FIRST registered instance every time, so a
+second Inventor opened by hand can't be reached. Open documents are not in the ROT either.
+`DispatchEx("Inventor.Application")` always starts a new process and returns it; keep that reference
+(the process outlives it, but nothing can find it again). When the first Inventor quits, the next one
+moves up in the ROT.
+
+`DesignProject.Activate(False)` switches the project for this session only — the default project of
+the next Inventor start stays as it was. Inventor refuses to switch while any document is open.
+
 ## Chamfer — API changed in 2026
 
 `CreateChamferDefinition()` was **removed**. Use:

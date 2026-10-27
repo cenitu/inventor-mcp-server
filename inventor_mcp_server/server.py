@@ -1,14 +1,18 @@
 """MCP Server for Autodesk Inventor parametric modeling."""
 
+import asyncio
 import concurrent.futures
 import functools
+import inspect as _inspect  # `inspect` is a tool name below
 import json
 import os
 import sys
 import threading
 import time
+from typing import Annotated
 
 import pythoncom
+from pydantic import Field
 try:
     # MCP Python SDK 2.x — FastMCP was renamed MCPServer
     from mcp.server import MCPServer as FastMCP
@@ -33,17 +37,12 @@ mcp = FastMCP(
         "→ constrain by origin geometry / constrain_insert for bolt-in-hole. "
         "For anything not covered by a dedicated tool, use execute_python "
         "(persistent namespace, live inv/app/comp/body/tg objects). "
-        "After editing inventor_api.py on disk, call reload_api — no server restart needed."
+        "After editing inventor_api.py on disk, call reload_api — no server restart needed. "
+        "Several Inventors (e.g. one per project, one per agent): connect(new_instance=True, "
+        "project=..., instance=<name>) starts a separate one; then pass instance=<name> to every "
+        "call. list_instances shows them."
     ),
 )
-
-inv = _api.InventorConnection()
-
-# Persistent namespace for execute_python (variables survive between calls)
-_exec_ns: dict = {}
-_exec_ns_created = time.time()
-_exec_output = None  # stdout buffer of the execute_python call in progress
-
 
 class _ThreadStdout:
     """sys.stdout that sends the Inventor thread's prints to execute_python's buffer.
@@ -66,16 +65,25 @@ class _ThreadStdout:
         return getattr(self.default, name)
 
 
-# ---------- Inventor call thread ----------
+# ---------- Inventor instances and their call threads ----------
 #
-# Every Inventor call runs on this one thread (COM objects stay on the thread that made
-# them). The tool waits CALL_TIMEOUT seconds at most, so a call stuck behind a modal
-# dialog, or a long job, no longer freezes the whole server: the client gets an answer
-# before its own timeout, and call_status picks up the result later.
+# One server can drive several Inventors at once — Claude Desktop runs a single server
+# for all its chats, so two agents on two projects share it. Each connected Inventor is
+# an _Instance with a name, its own call thread, execute_python namespace and last call:
+# the agents don't wait for each other or overwrite each other's variables.
+#
+# Every call to an Inventor runs on that Inventor's thread (COM objects stay on the
+# thread that made them). The tool waits CALL_TIMEOUT seconds at most, so a call stuck
+# behind a modal dialog, or a long job, never freezes the server: the client gets an
+# answer before its own timeout, and call_status picks up the result later.
+#
+# An Inventor the user opened by hand can't be told apart: Windows hands every client
+# the first one that registered. So a second Inventor is one the server starts itself
+# (connect(new_instance=True)) — it keeps the reference.
 
 CALL_TIMEOUT = float(os.environ.get("INVENTOR_MCP_CALL_TIMEOUT", "50"))
-_com_thread = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="inventor-com", initializer=pythoncom.CoInitialize)
+DEFAULT = "default"
+_local = threading.local()  # .instance on each Inventor thread
 
 
 class _Call:
@@ -87,25 +95,77 @@ class _Call:
         future.add_done_callback(lambda _: setattr(self, "finished", time.monotonic()))
 
 
-_last_call: _Call | None = None
+class _Instance:
+    def __init__(self, name):
+        self.name = name
+        self.conn = _api.InventorConnection()
+        self.ns: dict = {}              # execute_python's namespace (variables persist)
+        self.ns_created = time.time()
+        self.output = None              # stdout buffer of the execute_python call in progress
+        self.last_call: _Call | None = None
+        self.lock = threading.Lock()    # two clients' calls arrive on two threads
+        self.thread = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"inventor-{name}", initializer=self._init_thread)
+
+    def _init_thread(self):
+        pythoncom.CoInitialize()
+        _local.instance = self
+
+    @property
+    def attached(self) -> bool:
+        return self.conn._app is not None
 
 
-def _dialog_report() -> str:
+_instances: dict[str, _Instance] = {DEFAULT: _Instance(DEFAULT)}
+
+
+class _CurrentConnection:
+    """`inv` in the tools: the connection of the Inventor whose thread runs the call."""
+
+    def __getattr__(self, name):
+        return getattr(_local.instance.conn, name)
+
+
+inv = _CurrentConnection()
+
+
+class _NoInstance(Exception):
+    pass
+
+
+def _names() -> str:
+    return ", ".join(n for n, i in _instances.items() if i.attached) or "none"
+
+
+def _pick(name: str) -> _Instance:
+    if name:
+        if name not in _instances:
+            raise _NoInstance(f"No Inventor is connected as '{name}' (connected: {_names()}). "
+                              "See list_instances, or connect(instance=...) first.")
+        return _instances[name]
+    attached = [i for i in _instances.values() if i.attached]
+    if len(attached) > 1:
+        raise _NoInstance(f"Several Inventors are connected ({_names()}) — pass instance=<name> "
+                          "to say which one (list_instances shows their projects).")
+    return attached[0] if attached else _instances[DEFAULT]
+
+
+def _dialog_report(inst: _Instance) -> str:
     try:
-        dialogs = _api.modal_dialogs(inv.main_hwnd)
+        dialogs = _api.modal_dialogs(inst.conn.main_hwnd)
     except Exception:
         return ""
     if not dialogs:
         return ""
-    lines = ["Inventor is showing a modal dialog. It blocks every API call until someone "
-             "answers it in Inventor — ask the user to read it and click the right button:"]
+    lines = [f"Inventor '{inst.name}' is showing a modal dialog. It blocks every API call until "
+             "someone answers it in Inventor — ask the user to read it and click the right button:"]
     lines += [f'  [{d["title"]}] {d["text"]}' for d in dialogs]
     return "\n".join(lines)
 
 
-def _busy_report(call: _Call) -> str:
+def _busy_report(inst: _Instance, call: _Call) -> str:
     msg = f"'{call.name}' has been running for {time.monotonic() - call.started:.0f} s."
-    return msg + "\n" + (_dialog_report() or
+    return msg + "\n" + (_dialog_report(inst) or
                          "No dialog is open — Inventor is still working on it (a long operation).")
 
 
@@ -113,7 +173,7 @@ def _silent_call(fn, args, kwargs):
     """Runs on the Inventor thread, with SilentOperation on: Inventor answers its own
     prompts (save dependents?, use the resolved file?) with the default instead of
     opening a dialog that waits for a click."""
-    app, prev = inv._app, None
+    app, prev = _local.instance.conn._app, None
     if app is not None:
         try:
             prev = app.SilentOperation
@@ -130,49 +190,62 @@ def _silent_call(fn, args, kwargs):
                 pass
 
 
-def _on_com_thread(fn, args, kwargs):
-    global _last_call
-    if _last_call is not None and not _last_call.future.done():
-        return (_busy_report(_last_call) + f"\nThis '{fn.__name__}' call was NOT started. "
-                "Use call_status to follow the running call.")
-    blocker = _dialog_report()
-    if blocker:
-        return blocker + f"\nThis '{fn.__name__}' call was NOT started. Retry once the dialog is closed."
-    call = _Call(fn.__name__, _com_thread.submit(_silent_call, fn, args, kwargs))
-    _last_call = call
+def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
+    with inst.lock:
+        c = inst.last_call
+        if c is not None and not c.future.done():
+            return (_busy_report(inst, c) + f"\nThis '{fn.__name__}' call was NOT started. "
+                    "Use call_status to follow the running call.")
+        blocker = _dialog_report(inst)
+        if blocker:
+            return blocker + f"\nThis '{fn.__name__}' call was NOT started. Retry once the dialog is closed."
+        call = _Call(fn.__name__, inst.thread.submit(_silent_call, fn, args, kwargs))
+        inst.last_call = call
     try:
-        return call.future.result(timeout=CALL_TIMEOUT)
+        return call.future.result(timeout=CALL_TIMEOUT if wait is None else wait)
     except concurrent.futures.TimeoutError:
         call.timed_out = True
-        return (_busy_report(call) + "\nIt keeps running in the background — "
+        return (_busy_report(inst, call) + "\nIt keeps running in the background — "
                 "call call_status to follow it and get its result.")
 
 
+Instance = Annotated[str, Field(
+    description="Which connected Inventor to use (list_instances). Leave empty when only one is connected.")]
+
+
 def tool(com: bool = True):
-    """mcp.tool() that runs the function on the Inventor thread (see above).
-    com=False for tools that must answer while that thread is busy."""
+    """mcp.tool() that runs the function on the chosen Inventor's thread (see above) and
+    adds an `instance` parameter to pick it. com=False for tools that must answer while
+    that thread is busy.
+    The tool is async and waits in a worker thread: the MCP SDK runs sync tools on its
+    event loop, so one agent's long call would hold up another agent's Inventor."""
     def deco(fn):
         if not com:
             return mcp.tool()(fn)
 
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            return _on_com_thread(fn, args, kwargs)
+        async def wrapper(*args, instance: str = "", **kwargs):
+            try:
+                inst = _pick(instance)
+            except _NoInstance as e:
+                return str(e)
+            return await asyncio.to_thread(_on_com_thread, inst, fn, args, kwargs)
+
+        sig = _inspect.signature(fn)
+        wrapper.__signature__ = sig.replace(parameters=[
+            *sig.parameters.values(),
+            _inspect.Parameter("instance", _inspect.Parameter.KEYWORD_ONLY, default="", annotation=Instance)])
         return mcp.tool()(wrapper)
     return deco
 
 
-@tool(com=False)
-def call_status() -> str:
-    """Follow a call that outlived the wait (a long job, or one stuck behind an Inventor
-    dialog): elapsed time, any open dialog's text, execute_python output so far — and
-    the call's result once it has finished. Safe to call at any time."""
-    c = _last_call
+def _call_status(inst: _Instance) -> str:
+    c = inst.last_call
     if c is None:
         return "No Inventor call has been made yet."
     if not c.future.done():
-        out = _exec_output.getvalue().strip() if c.name == "execute_python" and _exec_output else ""
-        return _busy_report(c) + (f"\nOutput so far:\n{out[-3000:]}" if out else "")
+        out = inst.output.getvalue().strip() if c.name == "execute_python" and inst.output else ""
+        return _busy_report(inst, c) + (f"\nOutput so far:\n{out[-3000:]}" if out else "")
     took = f"{c.finished - c.started:.0f} s"
     if not c.timed_out or c.collected:
         return f"Last call '{c.name}' finished ({took}); its result was already returned."
@@ -182,6 +255,19 @@ def call_status() -> str:
     except Exception as e:
         result = f"ERROR: {type(e).__name__}: {e}"
     return f"'{c.name}' finished after {took}:\n{result}"
+
+
+@tool(com=False)
+def call_status(instance: Instance = "") -> str:
+    """Follow a call that outlived the wait (a long job, or one stuck behind an Inventor
+    dialog): elapsed time, any open dialog's text, execute_python output so far — and
+    the call's result once it has finished. Safe to call at any time."""
+    if instance or sum(i.attached for i in _instances.values()) <= 1:
+        try:
+            return _call_status(_pick(instance))
+        except _NoInstance as e:
+            return str(e)
+    return "\n\n".join(f"[{i.name}] {_call_status(i)}" for i in _instances.values() if i.attached)
 
 
 # ---------- Power tools (token savers) ----------
@@ -196,8 +282,9 @@ def execute_python(code: str) -> str:
       doc  — active document          comp — its ComponentDefinition
       body — comp.SurfaceBodies.Item(1) (or None)
       tg   — TransientGeometry        math — math module
-    Variables you assign persist between calls (one shared namespace) until the server
-    restarts or reload_api runs — status shows the namespace's age and names.
+    Variables you assign persist between calls until the server restarts or reload_api
+    runs — status shows the namespace's age and names. Each connected Inventor has its
+    own namespace.
     Internal COM units are CENTIMETERS — divide mm by 10.
     Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
     directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
@@ -206,10 +293,15 @@ def execute_python(code: str) -> str:
     Returns captured stdout (print your results!) or the traceback on error.
     """
     import io, traceback, math as _math
-    global _exec_output
-    ctx = {"inv": inv, "math": _math}
+    me = _local.instance
+    ctx = {"inv": me.conn, "math": _math}
     try:
+        # only the default reconnects by itself: a named Inventor that was closed must not
+        # silently become whichever Inventor Windows hands out first
         if not inv.is_connected():
+            if me.name != DEFAULT:
+                return (f"Inventor '{me.name}' is closed. Start it again with "
+                        f"connect(new_instance=True, instance='{me.name}', project=...).")
             inv.connect()
         ctx["app"] = inv.app
         ctx["tg"] = inv.app.TransientGeometry
@@ -222,15 +314,15 @@ def execute_python(code: str) -> str:
                 ctx["body"] = None
     except Exception:
         pass
-    _exec_ns.update(ctx)
-    buf = _exec_output = io.StringIO()
+    me.ns.update(ctx)
+    buf = me.output = io.StringIO()
     if not isinstance(sys.stdout, _ThreadStdout):
         sys.stdout = _ThreadStdout(sys.stdout)
     sys.stdout.local.buf = buf
     try:
         try:
             # silent again in case this call connected first (the thread found no app)
-            inv._silently(lambda: exec(compile(code, "<mcp>", "exec"), _exec_ns))
+            inv._silently(lambda: exec(compile(code, "<mcp>", "exec"), me.ns))
         finally:
             sys.stdout.local.buf = None
         out = buf.getvalue().strip()
@@ -246,16 +338,17 @@ def execute_python(code: str) -> str:
 @tool()
 def reload_api() -> str:
     """Hot-reload inventor_api.py from disk. Use after editing the wrapper —
-    no Claude Code restart needed. Keeps the existing COM connection."""
+    no Claude Code restart needed. Keeps the COM connections; clears this Inventor's
+    execute_python namespace."""
     import importlib
-    global inv, _exec_ns_created
     importlib.reload(_api)
-    old = inv
-    inv = _api.InventorConnection()
-    inv._app, inv.main_hwnd = old._app, old.main_hwnd
-    _exec_ns.clear()
-    _exec_ns_created = time.time()
-    return "inventor_api.py reloaded (connection preserved)"
+    for i in _instances.values():
+        old, i.conn = i.conn, _api.InventorConnection()
+        i.conn._app, i.conn.main_hwnd = old._app, old.main_hwnd
+    me = _local.instance
+    me.ns.clear()
+    me.ns_created = time.time()
+    return "inventor_api.py reloaded (connections preserved)"
 
 
 @tool()
@@ -294,14 +387,94 @@ def transaction(action: str = "begin", name: str = "MCP batch") -> str:
 
 # ---------- Connection ----------
 
-@tool()
-def connect(visible: bool = True) -> str:
-    """Connect to Autodesk Inventor. Starts Inventor if not running.
+@tool(com=False)
+async def connect(visible: bool = True, new_instance: bool = False, project: str = "",
+            instance: Annotated[str, Field(description=(
+                "Name for this Inventor — pass the same name to later calls. "
+                "Default: 'default', or the project's name for a new_instance."))] = "") -> str:
+    """Connect to Autodesk Inventor. Starts Inventor if none is running.
+
+    Several Inventors can be driven at once — e.g. two agents on two projects. Start the
+    second one with new_instance=True (an Inventor opened by hand can't be reached: Windows
+    always hands out the first one), then pass instance=<name> to every call for it.
 
     Args:
         visible: Show Inventor window (default True).
+        new_instance: Start a separate Inventor of its own instead of using the running one.
+        project: Full path of an .ipj to make active. Inventor only switches projects
+                 while it has no documents open.
     """
-    return inv.connect(visible)
+    if new_instance:
+        name = instance or (os.path.splitext(os.path.basename(project))[0] if project
+                            else f"inventor{len(_instances) + 1}")
+        if name in _instances and _instances[name].attached:
+            return f"An Inventor is already connected as '{name}' — pick another instance name."
+    else:
+        name = instance or DEFAULT
+    inst = _instances.setdefault(name, _Instance(name))
+
+    def connect_():  # on that Inventor's thread
+        conn = _local.instance.conn
+        if new_instance or not conn.is_connected():
+            msg = conn.connect(visible, new_instance=new_instance)
+            other = next((i.name for i in _instances.values()
+                          if i is not inst and i.attached and i.conn.pid == conn.pid), None)
+            if other:
+                pid, conn._app, conn.main_hwnd = conn.pid, None, None
+                return (f"That Inventor (pid {pid}) is already connected as '{other}' — use "
+                        f"instance='{other}', or connect(new_instance=True) to start a separate one.")
+        else:
+            msg = "Already connected"
+        if project:
+            msg += "\n" + conn.activate_project(project)
+        msg += f"\nInventor '{name}': pid {conn.pid}, project {conn.project_info()['name']}."
+        if sum(i.attached for i in _instances.values()) > 1:
+            msg += f"\nSeveral Inventors are connected ({_names()}) — pass instance='{name}' to every call for this one."
+        return msg
+
+    connect_.__name__ = "connect"
+    return await asyncio.to_thread(_on_com_thread, inst, connect_, (), {})
+
+
+def _describe():  # on an Inventor's thread
+    me = _local.instance
+    if not me.conn.is_connected():
+        return "closed (its Inventor is gone — connect again)"
+    app, proj = me.conn.app, me.conn.project_info()
+    doc = app.ActiveDocument
+    return (f"pid {me.conn.pid}, project {proj['name']} ({proj['path']}), "
+            f"{app.Documents.VisibleDocuments.Count} open, active: {doc.DisplayName if doc else '-'}")
+
+
+@tool(com=False)
+async def list_instances() -> str:
+    """The Inventors this server is connected to — name, project, open documents — and any
+    other running Inventor it can't reach (opened by hand). Answers even while they are busy."""
+    return await asyncio.to_thread(_list_instances)
+
+
+def _list_instances() -> str:
+    lines = []
+    for i in _instances.values():
+        if not i.attached:
+            continue
+        c = i.last_call
+        if c is not None and not c.future.done():
+            lines.append(f"{i.name}: busy — {_busy_report(i, c)}")
+        elif _dialog_report(i):
+            lines.append(f"{i.name}: {_dialog_report(i)}")
+        else:
+            try:
+                lines.append(f"{i.name}: {i.thread.submit(_describe).result(timeout=5)}")
+            except Exception as e:
+                lines.append(f"{i.name}: no answer ({type(e).__name__})")
+    reached = {i.conn.pid for i in _instances.values() if i.attached}
+    for pid in _api.inventor_pids():
+        if pid not in reached:
+            lines.append(f"(pid {pid}: not connected — opened by hand, or by a server that is gone. "
+                         "connect() reaches it only if it is the first Inventor that started; "
+                         "otherwise save its work and close it, and use connect(new_instance=True).)")
+    return "\n".join(lines) or "No Inventor is running. Call connect()."
 
 
 @tool()
@@ -309,16 +482,18 @@ def status() -> str:
     """Check connection status, active document info, and the execute_python
     namespace (age, names you defined — gone after a server restart or reload_api).
     If Inventor is busy or showing a dialog, says so instead."""
+    me = _local.instance
     if not inv.is_connected():
-        return "Not connected to Inventor. Call connect() first."
+        return f"Inventor '{me.name}' is not connected. Call connect() first."
     try:
         info = inv.get_document_info()
     except RuntimeError:
         info = {"document": None}
-    defined = sorted(k for k in _exec_ns
+    info["inventor"] = {"instance": me.name, "pid": inv.pid, "project": inv.project_info()["name"]}
+    defined = sorted(k for k in me.ns
                      if not k.startswith("__") and k not in ("inv", "app", "doc", "comp", "body", "tg", "math"))
     info["python_namespace"] = {
-        "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(_exec_ns_created)),
+        "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(me.ns_created)),
         "names": defined,
     }
     return json.dumps(info, indent=2, ensure_ascii=False)
