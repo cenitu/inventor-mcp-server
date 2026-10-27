@@ -168,6 +168,12 @@ blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", 
 kinds = [getattr(b, "type", None) for b in blocks]
 check("view_image reaches the client as images", kinds == ["image", "image"], str(kinds))
 
+print("Keeper (no Inventor needed):")
+keeper_mod = importlib.import_module("inventor_mcp_server.keeper")
+k = keeper_mod.Keeper()
+k.kept = {0x7FFFFFF0: (object(), True)}  # a window handle that doesn't exist
+check("the keeper lets go of an Inventor whose window is gone", k.Count() == 0)
+
 import io
 default, captured = io.StringIO(), io.StringIO()
 proxy = srv._ThreadStdout(default)

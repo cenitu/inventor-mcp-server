@@ -157,6 +157,16 @@ TopColor, BottomColor)` does (both colors, e.g. white for a plain background). S
 right 10755, …), `Fit()`, `Apply()`, save, then put Eye/Target/UpVector back. 800×600 takes ~0.6 s.
 `Document.ObjectVisibility.Sketches` / `UserWorkPlanes` / `OriginWorkPlanes` … hide the clutter.
 
+## Reaching a second Inventor again
+
+The ROT lists every Inventor under the same moniker and binding returns the first, so a reference
+to a second Inventor is the only way to it. Registering that reference under a new name fails:
+`IRunningObjectTable.Register(flags, inventorProxy, itemMoniker)` → E_INVALIDARG, with either
+flag and IUnknown or IDispatch. Registering an object that lives in the registering process works,
+and its methods can return the Inventor proxy — another process then calls Inventor directly. The
+registering process has to pump messages; a parent that blocks waiting on a child that calls back
+into it deadlocks (`subprocess.run` + an in-process object).
+
 ## Processes left behind
 
 An Inventor started with `DispatchEx` keeps running after the client process exits. After
