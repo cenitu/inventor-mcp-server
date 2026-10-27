@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-27
 
 ### Added
 - **`flat_pattern`** — flat size, thickness and bend count of a sheet metal part, and with a path a
