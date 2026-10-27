@@ -49,7 +49,17 @@ kVerticalDim   = 19202
 kAlignedDim    = 19203
 
 # SurfaceTypeEnum (Face.SurfaceType)
-# 5890=Plane, 5891=Cylinder, 5892/5893=Cone, 5894=Sphere, 5895=Torus
+# 5890=Plane, 5891=Cylinder, 5892=EllipticCylinder, 5893=Cone, 5894=EllipticCone,
+# 5895=Torus, 5896=Sphere, 5897=BSpline  (earlier notes here had 5892–5894 wrong)
+
+# HealthStatusEnum (feature.HealthStatus, constraint.HealthStatus)
+# 11778=UpToDate, 11779=OutOfDate, 11780=DriverLost, 11781=InError, 11782=Deleted,
+# 11783=CannotCompute, 11784=Suppressed, 11785=BeyondStopNode, 11786=Inconsistent,
+# 11787=Redundant — the server reads the names from the type library
+# (inventor_api.health_name) and falls back to this table
+
+# AngleConstraintSolutionTypeEnum (4th argument of AddAngleConstraint)
+# 78593=kDirectedSolution
 ```
 
 ## Internal units are CENTIMETERS
@@ -246,6 +256,18 @@ tap = hf.CreateTapInfo(True, "ISO Metric profile", "M16x2", "6H", True)
 - Prefer `GeometricConstraints.AddCoincident(center, projected_axis)` over
   zero-value dimensions; `AddSymmetry(l1, l2, axis_line)` to center base sketches.
 
+## Features — what can't be done or changed
+
+- **`FilletFeatures.AddSimple`** follows tangent chains: one edge picks up every
+  tangent-continuous neighbour. The order of fillets matters — a fillet changes the
+  edges the next one finds; fillet the large radii first.
+- **`KnitFeatures.Add` failed with E_FAIL** on imported (STEP) surface bodies in every
+  form tried. Repair or stitch them in the source, or import as a solid.
+- **`FaceFeature.Definition` can't be changed afterwards** — delete and recreate.
+- **`ContourFlangeDefinition` has no flip.** The material side follows the profile's
+  direction: draw the profile the other way round to put the material on the other side.
+- A feature-level bend radius works as an expression string: `BendRadius = "0.8 mm"`.
+
 ## Sheet Metal (2026)
 
 ### Activating a sheet metal rule
@@ -333,6 +355,10 @@ occ.Grounded = True
   Skip `SetTranslation` for the identity placement.
 - **Ground the first component.** Otherwise the solver satisfies constraints by
   moving the part you consider fixed.
+- **Assembly work planes / axes are not grounded.** `comp.WorkPlanes.AddFixed(...)` and
+  `comp.WorkAxes.AddFixed(...)` in an assembly create features the solver may move:
+  constrain parts to one and the solver moves the plane instead of the parts. Set
+  `wp.Grounded = True` right after creating it.
 
 ### Constraints need geometry PROXIES
 
@@ -347,7 +373,9 @@ comp.Constraints.AddInsertConstraint(circEdgeProxy1, circEdgeProxy2, axes_oppose
 
 - `CreateGeometryProxy` is documented as taking an out-parameter; under pywin32
   **dynamic dispatch it simply returns the proxy**.
-- Angle constraints are in radians, like everything else.
+- Angle constraints are in radians, like everything else. Pass the solution type
+  explicitly — `AddAngleConstraint(p1, p2, angle_rad, 78593)` (kDirectedSolution) —
+  so the angle is measured in a defined direction instead of flipping.
 - Prefer origin planes/axes (`WorkPlanes.Item(1/2/3)` = YZ/XZ/XY, `WorkAxes.Item(1/2/3)`
   = X/Y/Z) over picked faces: origin constraints survive part edits, face picks
   break as soon as topology renumbers.
@@ -402,8 +430,17 @@ can flip. Always verify with
   updated (an assembly whose sub-assembly re-evaluated, a part edited in
   context), Inventor opens "Do you want to save changes to ... and its
   dependents?" — even when called through the API — and the call waits until a
-  user clicks OK. Use `doc.Save2(True)` (save dirty dependents too) with
-  `app.SilentOperation = True` around it, and restore the flag afterwards.
+  user clicks OK. Use `Save2` with `app.SilentOperation = True` around it, and
+  restore the flag afterwards.
+- **`Save2(True)` saves every dirty dependent — library files included.** Opening an
+  old assembly can mark its standard Content Center parts dirty (Inventor recomputes
+  them), and `Save2(True)` then rewrites those shared files. `save_document` instead
+  saves each dirty dependent with `Save2(False)`, skipping files under the active
+  project's `LibraryPaths`, its `ContentCenterPath`, `app.FileOptions.ContentCenterPath`
+  and any part whose `ComponentDefinition.IsContentMember` is True, then the document
+  itself with `Save2(False)`. (`Save2(True, objectCollection)` would also limit the
+  set, but one failing file fails the whole call.) `ProjectPath.Path` can be relative
+  to the .ipj's folder.
 - **`Documents.Add(type, template, True)` does not reliably activate the new
   document.** `app.ActiveDocument` can keep returning the previous one, so code
   that works on "the active document" edits the wrong file. Call `doc.Activate()`
@@ -411,6 +448,41 @@ can flip. Always verify with
   `ActiveDocument` in scripts.
 - Documents opened as references of an assembly are invisible; `Activate()` on
   them fails — open them visibly with `app.Documents.Open(path, True)` first.
+- **`Documents.Open(path, False)` documents can disappear.** An invisible document
+  nothing references can be closed by Inventor later (e.g. when another document
+  closes); a variable holding it then raises RPC_E_DISCONNECTED. Keep a visible
+  reference, or reopen by path before each use.
+
+## Stale objects and collections
+
+- **COM objects go stale.** After a document is closed and reopened, or a feature
+  deleted (also by an undo), objects fetched before raise `RPC_E_DISCONNECTED`
+  (0x80010108, "the object invoked has disconnected from its clients"). Re-resolve
+  them from `app` / `doc` — don't keep them in the `execute_python` namespace across
+  such steps.
+- **Collections can lag.** E.g. `comp.RepresentationsManager.PositionalRepresentations`
+  can return the old list right after `.Add` on an object fetched before. Re-query
+  the collection from its owner on each use.
+- **Assembly MassProperties can be stale** until the document is updated: the
+  value cached in the file comes back (`CacheResultsOnCompute`). Call `doc.Update()`
+  and set `mp.CacheResultsOnCompute = False` before reading — `assembly_info` does.
+
+## Tuple-returning calls
+
+Out-parameters come back as a tuple under pywin32 dynamic dispatch:
+
+- `app.MeasureTools.GetMinimumDistance(a, b)` → a tuple; `[0]` is the distance in cm.
+- `CurveEvaluator.GetStrokes(fromParam, toParam, tolerance)` needs the parameter
+  range — take it from `ev.GetParamExtents()` (a tuple: min, max) — and returns
+  (vertex count, flat coordinate list in cm).
+- `SurfaceBody.FindUsingRay(point, direction, radius)` returns the hit objects and
+  points as a tuple, not through the arguments.
+
+## Geometry queries
+
+- **`RangeBox` is loose on curved faces** — about 0.25 mm on elliptic and B-spline
+  faces (planar and cylindrical ones are tight). Don't use it for exact sizes; measure
+  with `MeasureTools` or evaluate the surface.
 
 ## Topology pitfalls
 
