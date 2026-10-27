@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-10-27
 
 ### Added
 - **`surface_to_solid`** — imported vendor models that came in as surfaces (no volume, no mass, no
@@ -28,6 +28,11 @@
   up; a wrong offset sign is corrected. It reports every OTHER component the constraint moved —
   constraints that dragged parts out of place went unnoticed before.
 - `list_occurrences(depth=2)` lists the components inside sub-assemblies with their paths.
+
+### Fixed
+- **The server starts and lists its tools on Linux** (Glama's build check runs it in a Debian
+  container): the Windows-only imports load only on Windows; elsewhere Inventor calls answer that
+  Windows with Inventor is required. Nothing changes on Windows.
 
 ## 0.8.0 — 2026-10-27
 
