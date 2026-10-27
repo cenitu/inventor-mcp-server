@@ -11,6 +11,15 @@
 - **`view_image(up="z")`** — named views for models built with Z up (Inventor's own assume Y up):
   front looks along +Y, top down -Z.
 
+- **Inventors survive a server restart.** Every Inventor the server starts is handed to a keeper
+  process (`keeper.py`, started detached, outliving the client's job when allowed) that registers one
+  object in the Running Object Table; a restarted server gets the Inventors back from it:
+  `connect(project=...)` reuses a kept Inventor in that project, `connect(pid=...)` picks one, and
+  `list_instances` lists them. Inventor's own object can't be registered under a new name from
+  another process (E_INVALIDARG for a proxy), hence the go-between. The keeper drops an Inventor
+  when its main window is gone or hidden (window checks only, no COM call) and exits after 10 min
+  holding none (`INVENTOR_MCP_KEEPER_IDLE`).
+
 ### Fixed
 - **`content_center` with a "/" in a category name** ("Structural Shapes/Square/Rectangular Tubes")
   — the path is matched longest-name-first.

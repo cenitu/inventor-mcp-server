@@ -543,15 +543,16 @@ def transaction(action: str = "begin", name: str = "MCP batch") -> str:
 # ---------- Connection ----------
 
 @tool(com=False)
-async def connect(visible: bool = True, project: str = "", new_instance: bool = False,
+async def connect(visible: bool = True, project: str = "", new_instance: bool = False, pid: int = 0,
             instance: Annotated[str, Field(description=(
                 "Name for this Inventor — pass the same name to later calls. Default: "
                 "'default', or the project's name when the server starts one for it."))] = "") -> str:
     """Connect to Autodesk Inventor. Starts Inventor if none is running.
 
     Working on a project? Pass project=<full path of its .ipj>: the server uses the
-    Inventor that already has it, or the running one if it is free to switch, or else
-    starts a separate Inventor for it — so two agents on two projects each get their own.
+    Inventor that already has it — also one a previous server started (after a restart of
+    Claude Desktop) — or the running one if it is free to switch, or else starts a separate
+    Inventor for it — so two agents on two projects each get their own.
     The answer names the instance; when several Inventors are connected, pass
     instance=<that name> to every later call.
 
@@ -559,16 +560,29 @@ async def connect(visible: bool = True, project: str = "", new_instance: bool = 
         visible: Show Inventor window (default True).
         project: Full path of an .ipj to work in.
         new_instance: Always start a separate Inventor.
+        pid: Connect to this kept Inventor (list_instances shows them) — e.g. two in one project.
     """
     if project:
         project = os.path.abspath(project)
         if not os.path.isfile(project):
             return f"Project file not found: {project}"
-    by_project = bool(project) and not new_instance and not instance
-    if by_project:
+    by_project = bool(project) and not new_instance and not instance and not pid
+    attach_pid = pid
+    if pid:
+        if any(i.attached and i.conn.pid == pid for i in _instances.values()):
+            return f"Inventor pid {pid} is already connected — see list_instances."
+        name = instance or f"pid {pid}"
+    elif by_project:
         hit = next((i for i in _instances.values() if i.attached and _same_file(i.project, project)), None)
+        kept = None
+        if hit is None:  # one a previous server started, still in this project?
+            connected = {i.conn.pid for i in _instances.values() if i.attached}
+            kept = next((k for k in await asyncio.to_thread(_api.kept_inventors)
+                         if k["pid"] not in connected and _same_file(k.get("project", ""), project)), None)
         if hit is not None:
             name = hit.name
+        elif kept is not None:
+            name, attach_pid = _free_name(project), kept["pid"]
         elif not _instances[DEFAULT].attached:
             name = DEFAULT   # the running Inventor, if it can take the project
         else:
@@ -584,7 +598,9 @@ async def connect(visible: bool = True, project: str = "", new_instance: bool = 
     def connect_():  # on that Inventor's thread
         me = _local.instance
         conn = me.conn
-        if new_instance or not conn.is_connected():
+        if attach_pid:
+            msg = conn.attach(attach_pid)
+        elif new_instance or not conn.is_connected():
             msg = conn.connect(visible, new_instance=new_instance)
             other = next((i.name for i in _instances.values()
                           if i is not inst and i.attached and i.conn.pid == conn.pid), None)
@@ -668,6 +684,13 @@ def _list_instances() -> str:
             except Exception as e:
                 lines.append(f"{i.name}: no answer ({type(e).__name__})")
     reached = {i.conn.pid for i in _instances.values() if i.attached}
+    for k in _api.kept_inventors():
+        if k["pid"] not in reached:
+            reached.add(k["pid"])
+            what = (f"project {k['project_name']}, {k['documents']} open" if "project" in k
+                    else "busy, didn't answer")
+            lines.append(f"(pid {k['pid']}: {what} — started by an earlier server and kept; "
+                         f"connect(project=...) or connect(pid={k['pid']}) picks it up.)")
     for pid in _api.inventor_pids():
         if pid not in reached:
             lines.append(f"(pid {pid}: not connected — opened by hand, or by a server that is gone. "

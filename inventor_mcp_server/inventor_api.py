@@ -78,6 +78,67 @@ def modal_dialogs(main_hwnd) -> list[dict]:
     return dialogs
 
 
+try:
+    from . import keeper as _keeper
+except ImportError:  # run as a script: inventor_api is imported from its own folder
+    import keeper as _keeper
+
+
+def keeper(start: bool = True):
+    """The keeper process's object (see keeper.py), started if needed. None if it can't be."""
+    import subprocess, sys, time
+    k = _keeper.find()
+    if k is not None or not start:
+        return k
+    flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    for extra in (0x01000000, 0):    # CREATE_BREAKAWAY_FROM_JOB — outlive the client's job if allowed
+        try:
+            subprocess.Popen([sys.executable, _keeper.__file__], creationflags=flags | extra,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
+            break
+        except OSError:
+            continue
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        k = _keeper.find()
+        if k is not None:
+            return k
+        time.sleep(0.2)
+    return None
+
+
+def kept_inventors(timeout: float = 8) -> list[dict]:
+    """Inventors the keeper holds: pid, project, open documents. Asked on a short-lived
+    thread with a time limit — an Inventor busy with another agent's call may not answer."""
+    import threading
+    found: list[dict] = []
+
+    def ask():
+        pythoncom.CoInitialize()
+        try:
+            k = keeper(start=False)
+            for a in (k.Apps() if k is not None else ()):
+                app = win32com.client.Dispatch(a)
+                info = {"pid": win32process.GetWindowThreadProcessId(int(app.MainFrameHWND))[1]}
+                found.append(info)
+                try:
+                    p = app.DesignProjectManager.ActiveDesignProject
+                    info.update(project=p.FullFileName, project_name=p.Name,
+                                documents=app.Documents.VisibleDocuments.Count)
+                except Exception:
+                    info["busy"] = True
+        except Exception:
+            pass
+        finally:
+            pythoncom.CoUninitialize()
+
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    t.join(timeout)
+    return found
+
+
 def inventor_pids() -> list[int]:
     """Process ids of every running Inventor."""
     import subprocess
@@ -116,6 +177,7 @@ class InventorConnection:
                 while not self._app.Ready and time.monotonic() < deadline:
                     time.sleep(0.5)
                 msg = f"Started Inventor {self._app.SoftwareVersion.DisplayVersion}"
+                self._keep()
                 pid = win32process.GetWindowThreadProcessId(int(self._app.MainFrameHWND))[1]
                 if pid in running:
                     # an Inventor whose client went away without letting it finish quitting
@@ -129,6 +191,27 @@ class InventorConnection:
         except Exception:
             self.main_hwnd = None
         return msg
+
+    def _keep(self):
+        """Hand an Inventor we started to the keeper, so a restarted server finds it again."""
+        try:
+            k = keeper()
+            if k is not None:
+                k.Keep(self._app)
+        except Exception:
+            pass  # best effort: without the keeper, only a restart loses this Inventor
+
+    def attach(self, pid: int) -> str:
+        """Connect to an Inventor the keeper holds (one a previous server started)."""
+        pythoncom.CoInitialize()
+        k = keeper(start=False)
+        for a in (k.Apps() if k is not None else ()):
+            app = win32com.client.Dispatch(a)
+            hwnd = int(app.MainFrameHWND)
+            if win32process.GetWindowThreadProcessId(hwnd)[1] == pid:
+                self._app, self.main_hwnd = app, hwnd
+                return f"Connected to kept Inventor {app.SoftwareVersion.DisplayVersion} (pid {pid})"
+        raise RuntimeError(f"The keeper holds no Inventor with pid {pid} — see list_instances.")
 
     @property
     def pid(self) -> int | None:
