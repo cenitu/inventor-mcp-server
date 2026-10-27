@@ -984,14 +984,18 @@ def status() -> str:
 # ---------- Document management ----------
 
 @tool()
-def create_part(name: str = "", template: str = "metric") -> str:
-    """Create a new empty part document.
+def create_part(name: str = "", template: str = "metric", material: str = "",
+                part_number: str = "", description: str = "") -> str:
+    """Create a new empty part document — with its material and part number right away, so
+    no part is left "Generic" for the BOM and the mass.
 
     Args:
         name: Display name for the part (optional).
         template: Template type — "metric" (mm, default), "english" (inches), or full path to .ipt file.
+        material: Material from the library (list_materials), e.g. "Steel, Mild".
+        part_number, description: iProperties for the BOM.
     """
-    return inv.create_part(name or None, template)
+    return inv.create_part(name or None, template, material, part_number, description)
 
 
 @tool()
@@ -1706,7 +1710,7 @@ def bom(view: str = "parts_only", path: str = "") -> str:
 
 
 @tool()
-def properties(values: dict | None = None, material: str = "") -> str:
+def properties(values: dict | None = None, material: str = "", mass_kg: float = 0) -> str:
     """Read — and optionally set — the active document's iProperties: part number,
     description, stock number, vendor, revision, title, cost center, material, mass and
     custom properties. These feed the BOM and the drawing's title block.
@@ -1714,9 +1718,46 @@ def properties(values: dict | None = None, material: str = "") -> str:
     Args:
         values: e.g. {"part_number": "BRS-101", "description": "Side panel 2 mm",
                 "stock_number": "DKP-2.0"}. Unknown keys become custom properties.
-        material: Material name as in Inventor's library (e.g. "Steel, Mild").
+        material: Material name as in Inventor's library (e.g. "Steel, Mild"; list_materials).
+        mass_kg: Override the mass — for vendor models made of surfaces, which have no volume
+                 (a 1.23 kg motor showed 0.23 kg). material_report lists them.
     """
-    return json.dumps(inv.properties(values, material), indent=1, ensure_ascii=False, default=str)
+    return json.dumps(inv.properties(values, material, mass_kg), indent=1, ensure_ascii=False, default=str)
+
+
+@tool()
+def list_materials(search: str = "") -> str:
+    """Material names in Inventor's libraries, e.g. search="steel" or "alum" — the exact
+    names set_material / properties / create_part take."""
+    names = inv.list_materials(search)
+    return f"{len(names)} material(s): " + ", ".join(names[:150]) + (" …" if len(names) > 150 else "")
+
+
+@tool()
+def material_report(path: str = "", only_problems: bool = False) -> str:
+    """Material and mass of every part of the active assembly (or part; below `path` for a
+    sub-assembly): counts per material, total mass, and what needs a look — parts left on
+    Generic, vendor models made of surfaces (no volume, mass too low), parts with no mass.
+
+    Args:
+        path: Sub-assembly path to limit it to (list_occurrences(depth=2)).
+        only_problems: Just the summary and the problems, no per-part rows.
+    """
+    return json.dumps(inv.material_report(path, only_problems), indent=1, ensure_ascii=False)
+
+
+@tool()
+def set_material(material: str, parts: str = "*", only_generic: bool = False, path: str = "") -> str:
+    """Give many parts a material at once — every part of the active assembly whose name
+    matches. Content Center and library parts are left alone. Save afterwards.
+
+    Args:
+        material: From the library (list_materials), e.g. "Steel, Mild".
+        parts: Name patterns, ","-separated, e.g. "*PLATE*,*BRACKET*" ("*" = all parts).
+        only_generic: Only parts still on Generic / Default.
+        path: Limit to a sub-assembly (list_occurrences(depth=2)).
+    """
+    return inv.set_material(material, parts, only_generic, path)
 
 
 @tool()

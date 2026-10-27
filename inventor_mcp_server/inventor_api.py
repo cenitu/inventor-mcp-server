@@ -454,7 +454,16 @@ class InventorConnection:
 
     # ---------- Document management ----------
 
-    def create_part(self, name: str | None = None, template: str = "metric") -> str:
+    def create_part(self, name: str | None = None, template: str = "metric", material: str = "",
+                    part_number: str = "", description: str = "") -> str:
+        msg = self._create_part(name, template)
+        values = {k: v for k, v in (("part_number", part_number), ("description", description)) if v}
+        if values or material:
+            self.properties(values, material)
+            msg += "".join(f", {k} {v}" for k, v in (("material", material), *values.items()) if v)
+        return msg
+
+    def _create_part(self, name: str | None = None, template: str = "metric") -> str:
         import glob
 
         templates_path = self.app.FileLocations.TemplatesPath
@@ -1695,6 +1704,13 @@ class InventorConnection:
                                    "draw_arc, draw_slot, draw_rectangle(corner_radius), project_edges.")
         except Exception:
             info["body"] = "none"
+        try:
+            surfaces = self._surface_bodies(comp)
+            if surfaces:
+                info["surface_bodies"] = (f"{surfaces} surface body(ies) — no volume, so the mass is "
+                                          "missing or too low. properties(mass_kg=…) sets it.")
+        except Exception:
+            pass
         feats = []
         for i in range(1, comp.Features.Count + 1):
             f = comp.Features.Item(i)
@@ -2768,7 +2784,7 @@ class InventorConnection:
             lines.append(f"CSV: {path}")
         return "\n".join(lines)
 
-    def properties(self, values: dict | None = None, material: str = "") -> dict:
+    def properties(self, values: dict | None = None, material: str = "", mass_kg: float = 0) -> dict:
         """Read the active document's iProperties; set the given ones first. values keys:
         part_number, description, stock_number, vendor, revision, title, cost_center, or
         any other name (a custom property). material: a material name from the library."""
@@ -2788,10 +2804,19 @@ class InventorConnection:
         if material:
             self._set_material(doc, material)
             changed.append("material")
+        if mass_kg:
+            # surface-body vendor models have no volume, so no mass: give it by hand
+            doc.ComponentDefinition.MassProperties.Mass = float(mass_kg)
+            changed.append("mass")
         out = {k: self._prop(doc, k) for k in self._PROPS}
         custom = doc.PropertySets.Item("Inventor User Defined Properties")
         out["custom"] = {custom.Item(i).Name: custom.Item(i).Value for i in range(1, custom.Count + 1)}
         out["mass_kg"] = self._mass_kg(doc)
+        try:
+            if doc.ComponentDefinition.MassProperties.MassOverridden:
+                out["mass_overridden"] = True
+        except Exception:
+            pass
         if changed:
             out["changed"] = changed
         return out
@@ -2805,15 +2830,166 @@ class InventorConnection:
             if a.DisplayName.lower() == key:
                 doc.ActiveMaterial = a
                 return
-        libs = self.app.AssetLibraries
-        for i in range(1, libs.Count + 1):
-            assets = libs.Item(i).MaterialAssets
-            for j in range(1, assets.Count + 1):
-                a = assets.Item(j)
-                if a.DisplayName.lower() == key:
-                    doc.ActiveMaterial = a.CopyTo(doc)
-                    return
-        raise RuntimeError(f"No material {name!r} in the document or the material libraries.")
+        found = self._material_index().get(key)
+        if found is None:
+            import difflib
+            close = difflib.get_close_matches(key, list(self._material_index()), n=5, cutoff=0.5)
+            names = [self._material_index()[c][0] for c in close]
+            raise RuntimeError(f"No material {name!r} in the libraries."
+                               + (f" Close: {', '.join(names)}" if names else " See list_materials."))
+        lib, idx = found[1], found[2]
+        doc.ActiveMaterial = self.app.AssetLibraries.Item(lib).MaterialAssets.Item(idx).CopyTo(doc)
+
+    def _material_index(self) -> dict:
+        """lower name -> (name, library index, asset index) over every material library —
+        read once per connection, the libraries hold hundreds of materials."""
+        index = self.__dict__.get("_materials")
+        if index is None:
+            index = {}
+            libs = self.app.AssetLibraries
+            for i in range(1, libs.Count + 1):
+                assets = libs.Item(i).MaterialAssets
+                for j in range(1, assets.Count + 1):
+                    name = assets.Item(j).DisplayName
+                    index.setdefault(name.lower(), (name, i, j))
+            self._materials = index
+        return index
+
+    def list_materials(self, search: str = "") -> list[str]:
+        key = search.lower()
+        names = [n for n, _, _ in self._material_index().values() if key in n.lower()]
+        return sorted(names, key=lambda n: (not n.lower().startswith(key), n.lower()))
+
+    _GENERIC = ("generic", "default")
+
+    def _part_docs(self, path: str = "") -> list:
+        """The active part, or every distinct part document in the active assembly (below
+        `path` if given), first occurrence order."""
+        doc = self.active_document()
+        if doc.DocumentType == kPartDocumentObject:
+            return [doc]
+        if doc.DocumentType != kAssemblyDocumentObject:
+            raise RuntimeError("Open a part or an assembly.")
+        if path:
+            root = self._occ(path)
+            leaves = [o for _, o in self._leaves(root, path)]
+        else:
+            all_leaves = doc.ComponentDefinition.Occurrences.AllLeafOccurrences
+            leaves = [all_leaves.Item(i) for i in range(1, all_leaves.Count + 1)]
+        seen, docs = set(), []
+        for o in leaves:
+            try:
+                d = o.Definition.Document
+            except Exception:
+                continue
+            key = d.FullFileName or d.DisplayName
+            if key not in seen and d.DocumentType == kPartDocumentObject:
+                seen.add(key)
+                docs.append(d)
+        return docs
+
+    def _part_row(self, d, folders) -> dict:
+        comp = d.ComponentDefinition
+        row = {"part": d.DisplayName, "material": self._material_name(d), "mass_kg": self._mass_kg(d)}
+        try:
+            row["bodies"] = comp.SurfaceBodies.Count
+            surfaces = self._surface_bodies(comp)
+            if surfaces:
+                row["surface_bodies"] = surfaces
+        except Exception:
+            pass
+        try:
+            if comp.MassProperties.MassOverridden:
+                row["mass_overridden"] = True
+        except Exception:
+            pass
+        why = self._library_reason(d, folders)
+        if why:
+            row["library"] = why
+        return row
+
+    @staticmethod
+    def _surface_bodies(comp) -> int:
+        """Bodies without volume: open shells among the solids, and surfaces (WorkSurfaces —
+        where an imported vendor model's faces often end up)."""
+        n = 0
+        bodies = comp.SurfaceBodies
+        n += sum(1 for i in range(1, bodies.Count + 1) if not bodies.Item(i).IsSolid)
+        try:
+            ws = comp.WorkSurfaces
+            n += sum(ws.Item(i).SurfaceBodies.Count for i in range(1, ws.Count + 1))
+        except Exception:
+            pass
+        return n
+
+    @staticmethod
+    def _material_name(d) -> str:
+        try:
+            return d.ActiveMaterial.DisplayName
+        except Exception:
+            try:
+                return d.ComponentDefinition.Material.Name
+            except Exception:
+                return "?"
+
+    def material_report(self, path: str = "", only_problems: bool = False) -> dict:
+        """Material and mass of every part (active part / assembly, below path if given),
+        grouped, with what needs a look: Generic material, surface bodies (their volume — and
+        mass — is missing: set mass_kg), zero mass."""
+        folders = self.library_folders()
+        rows = [self._part_row(d, folders) for d in self._part_docs(path)]
+        problems = []
+        for r in rows:
+            why = []
+            if r["material"].lower() in self._GENERIC and "library" not in r:
+                why.append("generic material")
+            if r.get("surface_bodies") and not r.get("mass_overridden"):
+                why.append(f"{r['surface_bodies']} surface body(ies) — no volume, mass too low; set mass_kg")
+            if not r.get("mass_kg") and not r.get("surface_bodies"):
+                why.append("no mass" + (" — a Content Center member without a length? give it one"
+                                        if r.get("library") == "Content Center member" else ""))
+            if why:
+                problems.append(f"{r['part']}: {'; '.join(why)}")
+        by_material = {}
+        for r in rows:
+            by_material[r["material"]] = by_material.get(r["material"], 0) + 1
+        out = {"parts": len(rows), "by_material": by_material,
+               "total_mass_kg": round(sum(r.get("mass_kg") or 0 for r in rows), 3),
+               "problems": problems}
+        if not only_problems:
+            out["rows"] = rows
+        return out
+
+    def set_material(self, material: str, parts: str = "*", only_generic: bool = False,
+                     path: str = "") -> str:
+        """Give every matching part (active part / assembly, below path) a material.
+        parts: name patterns, ","-separated ("*PLATE*,BRACKET-?"), matched on the part name
+        and file name, case-insensitive. Library / Content Center parts are left alone."""
+        import fnmatch
+        pats = [p.strip().lower() for p in parts.split(",") if p.strip()] or ["*"]
+        folders = self.library_folders()
+        changed, kept, skipped = [], [], []
+        for d in self._part_docs(path):
+            names = [d.DisplayName.lower(), os.path.basename(d.FullFileName or "").lower()]
+            if not any(fnmatch.fnmatch(n, p) for n in names for p in pats):
+                continue
+            why = self._library_reason(d, folders)
+            if why:
+                skipped.append(f"{d.DisplayName} ({why})")
+                continue
+            if only_generic and self._material_name(d).lower() not in self._GENERIC:
+                kept.append(d.DisplayName)
+                continue
+            self._set_material(d, material)
+            changed.append(d.DisplayName)
+        msg = f"{material}: {len(changed)} part(s)" + (f" — {', '.join(changed[:30])}" if changed else "")
+        if kept:
+            msg += f"\nKept (already have a material): {len(kept)}"
+        if skipped:
+            msg += f"\nLeft alone: {', '.join(skipped[:20])}"
+        if changed:
+            msg += "\nUnsaved — save_document saves the changed parts with the assembly."
+        return msg
 
     def _drawing_template(self, template: str) -> str:
         import glob

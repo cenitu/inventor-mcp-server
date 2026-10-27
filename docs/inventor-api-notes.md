@@ -191,6 +191,17 @@ other two.
 - `AllLeafOccurrences` + `OccurrencePath` give every part with its path — compare their
   `Transformation` before and after a constraint to see what it moved.
 
+## Materials and mass
+
+- Material: `doc.ActiveMaterial = libraryAsset.CopyTo(doc)`; `app.AssetLibraries` hold ~100 materials
+  each — index the names once. A new part from the stock template is on "Generic".
+- Surfaces don't sit in `ComponentDefinition.SurfaceBodies` but in `WorkSurfaces(i).SurfaceBodies`
+  (an imported vendor model's faces often end up there); open shells in SurfaceBodies have
+  `IsSolid = False`. Neither has volume, so the part's mass is missing or too low.
+- `MassProperties.Mass = kg` overrides the mass; `MassProperties.MassOverridden` says so.
+- A structural Content Center member created without a custom length is 0.001 mm long
+  ("U 80 - 0,001") — no mass, wrong in the BOM.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
