@@ -15,7 +15,6 @@ import time
 import traceback
 from typing import Annotated
 
-import pythoncom
 from pydantic import Field
 try:
     # MCP Python SDK 2.x — FastMCP was renamed MCPServer
@@ -31,6 +30,8 @@ except ImportError:
     import os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import inventor_api as _api
+if _api.WINDOWS:
+    import pythoncom
 
 mcp = FastMCP(
     "Autodesk Inventor",
@@ -153,7 +154,8 @@ class _Instance:
             max_workers=1, thread_name_prefix=f"inventor-{name}", initializer=self._init_thread)
 
     def _init_thread(self):
-        pythoncom.CoInitialize()
+        if _api.WINDOWS:
+            pythoncom.CoInitialize()
         _local.instance = self
         self.thread_id = threading.get_ident()
 
@@ -374,6 +376,8 @@ def _run_call(inst: _Instance, call: _Call, fn, args, kwargs):
 
 
 def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
+    if not _api.WINDOWS:
+        return _api.NOT_WINDOWS
     with inst.lock:
         c = inst.last_call
         if c is not None and not c.future.done():
@@ -816,6 +820,8 @@ async def connect(visible: bool = True, project: str = "", new_instance: bool = 
         new_instance: Always start a separate Inventor.
         pid: Connect to this kept Inventor (list_instances shows them) — e.g. two in one project.
     """
+    if not _api.WINDOWS:
+        return _api.NOT_WINDOWS
     if project:
         project = os.path.abspath(project)
         if not os.path.isfile(project):
@@ -919,6 +925,8 @@ def _describe():  # on an Inventor's thread
 async def list_instances() -> str:
     """The Inventors this server is connected to — name, project, open documents — and any
     other running Inventor it can't reach (opened by hand). Answers even while they are busy."""
+    if not _api.WINDOWS:
+        return _api.NOT_WINDOWS
     return await asyncio.to_thread(_list_instances)
 
 
