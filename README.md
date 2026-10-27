@@ -29,12 +29,14 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Features
 
-- **59 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
+- **63 MCP tools**: sketching, extrude/revolve, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
 - **Assemblies with vendor parts**: `import_step` (keeps the files in your project folder), placement with full orientation, `check_interference` / `measure_distance`, and `sweep_rotation` to check a door or lock moves freely through its whole range
 - **Assemblies (IAM)**: place components, ground them, constrain by origin geometry (mate / flush / angle) or drop a bolt into a hole with a single Insert constraint
 - **`execute_python` power tool** — run arbitrary Python against the live COM connection with a persistent namespace (escape hatch for anything not covered by dedicated tools)
 - **Auto-reporting** — every feature operation returns a volume/topology delta (`Hole1 | V 23497 (-503 mm³) | F7 E14`), so the AI can self-verify each step
 - **Never hangs on a dialog** — calls run with `SilentOperation` on a dedicated Inventor thread. A call stuck behind a modal dialog, or a long job, returns within 50 s with the dialog's title and text (read from the window list, no COM call); `call_status` follows it and returns the result when it finishes
+- **Content Center and big assemblies** — `content_center` browses categories → families → sizes and makes members, custom length included (a 1500 mm DIN 1026-1 U 100 in one call); `place_many` places dozens of components with position, orientation, name and grounding in one call
+- **Agent-friendly Python** — `execute_python` errors show the traceback from the agent's own lines (also in helpers defined in earlier calls), stderr is captured, and `undo_on_error=True` rolls back everything the call did. `load_library` (or `~/.inventor-mcp/startup.py`) keeps helper code loaded across namespace resets. `save_document` checks the path first instead of failing with E_INVALIDARG; `close_unsaved` clears the Part12s left by failed attempts
 - **Several Inventors at once** — e.g. two agents on two projects (Claude Desktop runs one server for all its chats). `connect(project="…ipj")` reuses the Inventor that has the project, or the running one if it is free, or starts a separate one; every tool takes `instance=` to pick one, and each has its own call thread and `execute_python` namespace, so one agent's long call doesn't hold up the other. `list_instances` shows them. An Inventor opened by hand can't be targeted — Windows always hands out the first one — so let the server start the second
 - **Transactions** — wrap multi-step builds, roll back everything with one call
 - **Hot reload** — edit the API wrapper and reload without restarting the MCP client

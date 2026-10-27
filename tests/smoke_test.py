@@ -5,6 +5,8 @@ so a new Inventor release can be qualified in a couple of minutes:
 
     python tests/smoke_test.py            # starts Inventor if not running
     python tests/smoke_test.py --keep     # leave the test documents open
+    python tests/smoke_test.py --own      # start a separate Inventor, quit it at the end —
+                                          # leaves an Inventor someone is working in alone
 
 Nothing is saved to disk; the scratch documents it creates are closed without
 saving unless --keep is given. Documents that were already open (your own work,
@@ -410,17 +412,29 @@ def _doc_ids(inv):
 
 def main():
     keep = "--keep" in sys.argv
+    own = "--own" in sys.argv
     inv = api.InventorConnection()
     run = Runner()
 
     print("Inventor MCP smoke test")
     print("-" * 60)
     try:
-        print(" ", inv.connect())
+        print(" ", inv.connect(new_instance=own))
     except Exception as e:
         print(f"Cannot connect to Inventor: {e}")
         return 1
     print("  version:", inv.app.SoftwareVersion.DisplayVersion)
+    try:
+        return run_all(inv, run, keep)
+    finally:
+        if own and not keep:
+            inv.app.Quit()
+            inv._app = None
+            import time
+            time.sleep(10)  # leaving at once can leave a windowless Inventor process behind
+
+
+def run_all(inv, run, keep):
     preexisting = _doc_ids(inv)
     if preexisting:
         print(f"  {len(preexisting)} document(s) already open — will be left untouched")

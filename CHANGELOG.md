@@ -3,11 +3,39 @@
 ## Unreleased
 
 ### Added
+- **`content_center`** — browse the Content Center step by step (category path → families → sizes)
+  and make a member's part file; `length` makes a custom-length structural member. Nodes and families
+  are cached per Inventor, since walking the whole tree takes minutes.
+- **`place_many`** — place many components in one call (position or origin, `x_axis`/`y_axis`,
+  grounded, name). All files are checked before anything is placed.
+- **`load_library`** — run a Python file into the `execute_python` namespace and keep it: it is
+  loaded again by itself after `reload_api` or a server restart. `~/.inventor-mcp/startup.py`
+  (or `INVENTOR_MCP_STARTUP`) is loaded the same way for every Inventor. `status` lists them.
+- **`execute_python(undo_on_error=True)`** — the call runs in one undo transaction and is rolled back
+  if it raises: no half-built sketches or work planes left behind.
+- **`close_unsaved`** — close never-saved documents left by failed attempts (not ones another
+  document references). `status` lists them.
+- **`save_document(overwrite=...)`**.
 - **`connect(project=...)` finds or starts the right Inventor.** It reuses a connected Inventor that
   already has the project, else the running Inventor if it can switch (no documents open, or already
   in that project), else starts a separate Inventor named after the project. An agent only needs to
   know its project — not whether another agent is already working. An Inventor with documents open
   in another project is left alone.
+
+### Fixed
+- **`execute_python` tracebacks show the agent's own line.** Only the server's three outermost frames
+  were returned. Now the traceback starts at the agent's code, with source lines — also for a helper
+  defined in an earlier call. stderr (`traceback.print_exc()`) is captured too.
+- **`save_document` explains a bad path** instead of Inventor's `E_INVALIDARG`: invalid characters,
+  wrong extension, missing folder (a `/` in the name), a file that exists or is open in Inventor.
+  Saving again to the document's own path saves in place.
+- **Assembly mass was stale** after sub-assemblies changed (3607 kg reported, 3343 kg real):
+  `assembly_info` updates the document and recomputes instead of returning the cached value.
+- **`hole` that cut nothing was left behind.** If no material is removed (point off the body), the
+  feature and its sketch are deleted and the call fails with a hint. Parts that reject plain numbers
+  for the diameter/depth (Content Center members) get values with units.
+- **A new Inventor wasn't ready.** `connect(new_instance=True)` waits until Inventor reports
+  `Ready` — Content Center calls failed for the first seconds.
 
 ## 0.5.0 — 2026-10-27
 
