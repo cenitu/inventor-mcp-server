@@ -78,7 +78,7 @@ def assembly_tests(inv, run, plate, pin):
 
     run.step("ground pin", lambda: inv.ground_occurrence(2, True))
     run.step("unground pin", lambda: inv.ground_occurrence(2, False))
-    run.step("delete_occurrence", lambda: inv.delete_occurrence(2))
+    run.step("delete_occurrence", lambda: inv.delete_occurrence(2, force=True))
 
 
 def _first(text):
@@ -102,6 +102,7 @@ def _assert_mated(inv):
 
 def main():
     keep = "--keep" in sys.argv
+    own = "--own" in sys.argv  # a separate Inventor, quit at the end
     workdir = os.path.join(tempfile.gettempdir(), "inventor_mcp_smoke")
     os.makedirs(workdir, exist_ok=True)
 
@@ -111,12 +112,14 @@ def main():
     print("Inventor MCP assembly smoke test")
     print("-" * 60)
     try:
-        print(" ", inv.connect())
+        print(" ", inv.connect(new_instance=own))
     except Exception as e:
         print(f"Cannot connect to Inventor: {e}")
         return 1
     print("  version:", inv.app.SoftwareVersion.DisplayVersion)
     print("  workdir:", workdir)
+    if own:
+        inv.app.SilentOperation = True
 
     print("\nScratch parts:")
     plate, pin = build_parts(inv, run, workdir)
@@ -130,6 +133,12 @@ def main():
                 doc.Close(True)  # SkipSave
             except Exception:
                 pass
+
+    if own and not keep:
+        inv.app.Quit()
+        inv._app = None
+        import time
+        time.sleep(10)  # leaving at once can leave a windowless Inventor process behind
 
     print("\n" + "-" * 60)
     print(f"{run.passed} passed, {len(run.failed)} failed")

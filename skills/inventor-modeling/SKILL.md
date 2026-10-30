@@ -21,13 +21,17 @@ The MCP server has power tools that replace ad-hoc console scripts:
 - **`reload_api()`** — hot-reloads `inventor_api.py` after editing it. No Claude Code
   restart needed (new TOOL schemas still need a restart; new wrapper METHODS don't —
   call them via `execute_python`).
-- **`inspect()`** — one-call part snapshot (features, volume, bbox, sketches).
-- **`list_edges(min_length=...)` / `list_faces(min_area=...)`** — compact topology
-  tables; no more hand-written vertex-iteration loops.
+- **`inspect_model()`** — one-call snapshot of a part or assembly.
+- **`find_faces(...)` / `find_edges(...)`** — filtered topology, in a part or (with `path`) at
+  any depth of an assembly; no more hand-written vertex-iteration loops.
 - **`transaction("begin"/"commit"/"abort")`** — wrap risky multi-step builds;
   abort rolls back everything in one call (no manual feature deletion).
 
-Feature tools (extrude, hole, flange, ...) return an auto-report suffix like
+Tools have verb_noun names (`add_hole`, `add_flange`, `place_components`, `manage_*`). Code in
+`execute_python` calls the same operations on `inv`, under their own names: `inv.hole`,
+`inv.flange`, `inv.place_many`, `inv.draw_closed_profile` — as in the examples below.
+
+Feature tools (extrude, add_hole, add_flange, ...) return an auto-report suffix like
 `| V 23497 (-503 mm³) | F7 E14` — separate volume-check calls are unnecessary.
 
 ## Core mental model

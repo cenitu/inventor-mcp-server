@@ -219,6 +219,17 @@ Tested on 2027.1 with a 100×60×20 box (120000 mm³) and a Ø40×30 cylinder:
 - Surfaces live in `WorkSurfaces`, not `SurfaceBodies`; a knit hides the WorkSurfaces it consumed.
 - A transient body's face can't be deleted (`Face.Delete` fails on TransientBRep copies).
 
+## Deleting occurrences, patterns
+
+- A component's pattern (`AssemblyComponentDefinition.OccurrencePatterns`) doesn't go with its parent:
+  delete the parent and the elements recompute elsewhere, without an error. Delete the pattern first.
+- Deleting from a sub-assembly fails with a bare COM error while a document referencing it is open.
+- `Documents.CloseAll(False)` closes all, `CloseAll(True)` only unreferenced documents.
+- A transaction on the assembly (`TransactionManager.StartTransaction`) covers `Occurrences.Add`:
+  `Abort` removes what was placed.
+- `Camera.Apply()` alone doesn't redraw: call `View.Update()` before taking a picture.
+- `HoleFeatures.CreatePointPlacementDefinition(workPoint, workAxis)` places a hole at an absolute point.
+
 ## Pictures
 
 `View.SaveAsBitmap(path, width, height)` takes no colors; `Camera.SaveAsBitmap(path, width, height,
