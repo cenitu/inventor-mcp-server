@@ -177,11 +177,11 @@ It also checks every hard-coded enum constant against the live COM type library,
 renumbered enum in a future release shows up as a named failure instead of a cryptic
 COM error. Exit code = number of failed steps.
 
-Current results: **118/118 pass on Inventor 2027.1** (Python 3.12, mcp 1.29 and 2.3).
+Current results: **137/137 pass on Inventor 2027.1** (Python 3.12, mcp 1.29 and 2.3).
 
 `tests/assembly_smoke_test.py` does the same for the assembly tools — it builds a
 plate and a pin on disk, places them, and exercises mate / flush / angle / insert
-constraints (29/29 pass on Inventor 2027).
+constraints (30/30 pass on Inventor 2027.1).
 
 ## Skills (optional, recommended)
 

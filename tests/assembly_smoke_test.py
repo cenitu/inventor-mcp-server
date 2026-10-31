@@ -50,6 +50,13 @@ def assembly_tests(inv, run, plate, pin):
     run.step("list_occurrences", lambda: inv.list_occurrences())
     run.step("assembly_info", lambda: str(inv.assembly_info())[:160])
 
+    def assembly_status():
+        info = inv.get_document_info()
+        if info["type_name"] != "assembly" or info["components_count"] != 2 or "sketches_count" in info:
+            raise AssertionError(str(info))
+        return f"{info['components_count']} components, {info['constraints_count']} constraints"
+    run.step("status of an assembly", assembly_status)
+
     run.step("mate XY planes",
              lambda: inv.constrain(1, "XY", 2, "XY", "mate", offset=0))
     run.step("list_constraints", lambda: inv.list_constraints())
