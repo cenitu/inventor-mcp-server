@@ -1167,11 +1167,13 @@ def manage_materials(action: str = "report", material: str = "", search: str = "
 
 @tool()
 def manage_constraints(action: str = "list", index: int = 0) -> str:
-    """List the active assembly's constraints, or delete one.
+    """List the active assembly's constraints with their numbers, flagging any in an error
+    state; or delete one. To add one use constrain. Deleting frees the components it held, and
+    the numbers after it shift — list again before deleting another.
 
     Args:
         action: "list" or "delete".
-        index: Constraint index from list.
+        index: For "delete": the constraint's number from list.
     """
     if action.lower() == "list":
         return inv.list_constraints()
@@ -1422,11 +1424,14 @@ def save_document(path: str = "", overwrite: bool = False, save_dependents: bool
 
 @tool()
 def export_document(path: str, format: str = "STEP") -> str:
-    """Export active document to another format.
+    """Write the active document to a neutral CAD file, for a customer, a vendor or a printer.
+    An existing file at path is replaced; the file is checked afterwards and its size returned.
+    The Inventor document itself is unchanged — save_document saves that. For the laser use
+    export_flat_pattern, for a parts list export_bom, for a PDF create_drawing.
 
     Args:
-        path: Output file path (e.g. "D:/export/part.step").
-        format: Export format — STEP, STL, SAT, or IGES.
+        path: Output file, e.g. "D:/export/part.step".
+        format: STEP, IGES, SAT or STL.
     """
     return inv.export_document(path, format)
 
@@ -1496,7 +1501,9 @@ def draw_line(
     sketch_index: int = 0,
     construction: bool = False,
 ) -> str:
-    """Draw a line in a sketch. Coordinates in mm.
+    """Draw one straight line in a sketch, in the sketch's coordinates — an open line, or a
+    construction line for a revolve axis. Lines drawn one by one don't join into a profile:
+    for a closed shape use draw_closed_profile or draw_rectangle.
 
     Args:
         x1: Start X in mm.
@@ -1667,14 +1674,19 @@ def extrude(
     sketch_index: int = 0,
     extent_type: str = "distance",
 ) -> str:
-    """Extrude a sketch profile to create 3D geometry. Distance in mm.
+    """Turn a sketch's closed profile into 3D: add material, cut it, or start a new body.
+    For a turned shape use revolve; for sheet metal, add_sheet_metal_face and sheet_metal_cut.
+
+    Returns the feature name and the change, e.g. "V 23497 (-503 mm³) | F7 E14": read it — a cut
+    showing no volume change went the wrong way or missed the body; try the other direction.
+    Without a closed profile it fails and says where the gap is (as check_sketch does).
 
     Args:
-        distance: Extrusion distance in mm. Ignored when extent_type="all".
-        direction: Direction — positive, negative, or symmetric.
-        operation: Boolean operation — join, cut, intersect, surface, or new.
-        sketch_index: Sketch number to extrude (0 = latest sketch).
-        extent_type: Extent type — "distance" (fixed distance, default) or "all" (through entire body).
+        distance: mm. Ignored when extent_type="all".
+        direction: "positive" (along the sketch normal: +Z on the XY plane), "negative" or "symmetric".
+        operation: "join" (add), "cut", "intersect", "surface" or "new" (a separate body).
+        sketch_index: Sketch number (0 = latest sketch).
+        extent_type: "distance", or "all" to go through the entire body.
     """
     idx = sketch_index if sketch_index > 0 else None
     return inv.extrude(distance, direction, operation, idx, extent_type=extent_type)
@@ -1713,11 +1725,16 @@ def revolve(
 
 @tool()
 def fillet(radius: float = 2, edge_indices: str = "1") -> str:
-    """Add fillet (rounded edge) to edges of the solid body. Radius in mm.
+    """Round edges of the active part's first body. For an angled edge use chamfer; to round
+    a profile's corners before extruding, use draw_closed_profile radii.
+
+    Edge numbers change after every feature: run find_edges again before the next fillet, and
+    give all edges of one radius in one call. Tangent edges are followed automatically. Fails
+    if the radius doesn't fit the geometry — fillet the big radii first. Returns the feature name.
 
     Args:
-        radius: Fillet radius in mm.
-        edge_indices: Comma-separated edge indices (e.g. "1,2,3"). find_edges lists them.
+        radius: Fillet radius in mm, e.g. 2.
+        edge_indices: Comma-separated edge numbers from find_edges, e.g. "1,2,3".
     """
     indices = [int(i.strip()) for i in edge_indices.split(",")]
     return inv.fillet(radius, indices)
@@ -1725,11 +1742,15 @@ def fillet(radius: float = 2, edge_indices: str = "1") -> str:
 
 @tool()
 def chamfer(distance: float = 2, edge_indices: str = "1") -> str:
-    """Add chamfer (angled edge) to edges of the solid body. Distance in mm.
+    """Add an equal-distance chamfer to edges of the active part's first body. For rounded
+    edges use fillet; on sheet metal corners, add_corner_round.
+
+    Give ALL edges in one call: edge numbers change after every feature, so a second call with
+    old numbers hits the wrong edges. Returns the feature name.
 
     Args:
-        distance: Chamfer distance in mm.
-        edge_indices: Comma-separated edge indices (e.g. "1,2,3").
+        distance: Chamfer distance in mm, e.g. 2.
+        edge_indices: Comma-separated edge numbers from find_edges, e.g. "1,2,3".
     """
     indices = [int(i.strip()) for i in edge_indices.split(",")]
     return inv.chamfer(distance, indices)
@@ -1760,8 +1781,14 @@ def add_circular_pattern(
 
 @tool()
 def add_sheet_metal_face(sketch_index: int = 0) -> str:
-    """Create a base Sheet Metal Face from a closed sketch profile.
-    The first flat panel in a sheet metal part. Uses style's Thickness automatically."""
+    """Create the first flat panel of a sheet metal part from a closed sketch profile; add_flange
+    bends walls from its edges, sheet_metal_cut opens holes in it. Needs a part made with
+    create_document(kind="sheet_metal"). Set the rule first (manage_sheet_metal_rules): the panel
+    takes its thickness from the active rule, so it has none of its own to pass here.
+
+    Args:
+        sketch_index: Sketch number (0 = latest sketch).
+    """
     idx = sketch_index if sketch_index > 0 else None
     return inv.sheet_metal_face(idx)
 

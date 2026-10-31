@@ -7,7 +7,7 @@ description: Build parametric 3D parts in Autodesk Inventor 2026 via the project
 
 ## When this skill applies
 
-Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_document`, `extrude`, `revolve`, `add_hole`, `chamfer`, `fillet`, `circular_pattern`, etc. Also any direct Python work against `src/inventor_api.py` in `the inventor-mcp project root\`.
+Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_document`, `extrude`, `revolve`, `add_hole`, `chamfer`, `fillet`, `add_circular_pattern`, etc. Also any direct Python work against `src/inventor_api.py` in `the inventor-mcp project root\`.
 
 Keep explanations concrete; the result that matters is the model in Inventor, not the code.
 
