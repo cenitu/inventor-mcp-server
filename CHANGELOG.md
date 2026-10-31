@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 — 2026-11-01
 
+- Fuller descriptions for the seven tools that said least: `chamfer`, `fillet`, `extrude`,
+  `add_sheet_metal_face`, `export_document`, `draw_line`, `manage_constraints`.
+- README and modelling skill: tool names the 1.0 rename missed.
 - `get_status` fits the document: an assembly shows component and constraint counts instead of zeros,
   a drawing its sheet count, and every document a readable `type_name`.
 - `sheet_metal_cut`: the unused `cut_across_bends` parameter of `inv.sheet_metal_cut` is gone.
