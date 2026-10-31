@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `get_status` fits the document: an assembly shows component and constraint counts instead of zeros,
+  a drawing its sheet count, and every document a readable `type_name`.
+- `sheet_metal_cut`: the unused `cut_across_bends` parameter of `inv.sheet_metal_cut` is gone.
+- Smoke test covers `hole_along` into a side face, the flat pattern DXF and the drawing PDF.
+
 ## 1.0.0 — 2026-10-30
 
 One tool per job: **82 tools became 57**, with verb_noun names. Near-duplicates are merged and what
