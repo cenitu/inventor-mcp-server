@@ -7,7 +7,7 @@ description: Build parametric 3D parts in Autodesk Inventor 2026 via the project
 
 ## When this skill applies
 
-Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_part`, `extrude`, `revolve`, `hole`, `chamfer`, `fillet`, `circular_pattern`, etc. Also any direct Python work against `src/inventor_api.py` in `the inventor-mcp project root\`.
+Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_document`, `extrude`, `revolve`, `add_hole`, `chamfer`, `fillet`, `circular_pattern`, etc. Also any direct Python work against `src/inventor_api.py` in `the inventor-mcp project root\`.
 
 Keep explanations concrete; the result that matters is the model in Inventor, not the code.
 
@@ -40,7 +40,7 @@ Feature tools (extrude, add_hole, add_flange, ...) return an auto-report suffix 
 |---|---|
 | Units | API takes **millimeters**; Inventor stores internally in **cm** (the wrapper handles ÷10 automatically) |
 | Coordinates | XY is the default sketch plane. Z = "up"/axial in most templates |
-| Workflow | `connect → create_part → create_sketch → draw_* → extrude/revolve → hole → fillet/chamfer → save` |
+| Workflow | `connect → create_document → create_sketch → draw_* → extrude/revolve → add_hole → fillet/chamfer → save` |
 | Feature indices | 1-based, in creation order (`list_features()` to see them) |
 | Edge indices | 1-based, in Inventor's internal order — **change after every feature that adds/removes edges** |
 
@@ -100,7 +100,7 @@ Saving over an open .ipt fails with `E_INVALIDARG (-2147024809)`. Either delete 
 ### 6. Curves are arcs — never many short lines
 
 A round corner or a hole drawn as a polyline makes a faceted part: wrong flat patterns, ugly
-drawings, no concentric constraints, and `inspect` warns about it. Use real arcs:
+drawings, no concentric constraints, and `inspect_model` warns about it. Use real arcs:
 
 ```python
 inv.draw_rectangle(0, 0, 200, 100, corner_radius=15)                  # plate with R15 corners
@@ -318,7 +318,7 @@ Offset planes from XY have DIRECT axis mapping (x→X, y→Y), unlike base XZ.
 
 After a fillet, adjacent edges get extended/shortened — their midpoints move.
 (Verified: R20 fillet extended neighbouring slope edges from Y 17..33 to Y −3..33.)
-Re-find edges with `list_edges`/`find_edge` AFTER every fillet; never reuse
+Re-find edges with `find_edges` AFTER every fillet; never reuse
 pre-fillet coordinates.
 
 ### Feature order vs cuts
