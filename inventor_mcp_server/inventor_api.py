@@ -1,5 +1,6 @@
 """Wrapper around Autodesk Inventor COM API."""
 
+import math
 import os
 import sys
 
@@ -2225,6 +2226,70 @@ class InventorConnection:
         feat = ff.Add(fdef)
         return f"Sheet metal face: {feat.Name}{self._fmt_delta(before)}"
 
+    @staticmethod
+    def _profile_path(kind: str, width: float, height: float, flange: float, t: float) -> list:
+        """Points of an open profile (mm) on the XY plane, with the outer size starting at 0,0.
+        A contour flange puts the material on the right of the direction of travel."""
+        if kind == "L":
+            return [(t, height), (t, t), (width, t)]
+        if kind == "U":
+            return [(t, height), (t, t), (width - t, t), (width - t, height)]
+        if kind == "C":
+            return [(flange, height - t), (t, height - t), (t, t), (width - t, t),
+                    (width - t, height - t), (width - flange, height - t)]
+        if kind == "Z":
+            return [(0, t), (flange - t, t), (flange - t, height), (flange + width - t, height)]
+        if kind == "HAT":
+            return [(0, t), (flange, t), (flange, height), (flange + width, height),
+                    (flange + width, t), (2 * flange + width, t)]
+        raise ValueError(f"Unknown profile '{kind}'. Use L, U, C, Z or hat.")
+
+    def sheet_profile(self, kind: str, width: float, height: float, length: float,
+                      flange: float = 0, bend_radius: float = 0) -> str:
+        """One bent profile as one contour flange: outer sizes in the XY plane, length along +Z.
+        The sheet thickness comes from the active rule, the bend radius too unless given."""
+        comp = self.active_part()
+        if not hasattr(comp, "SheetMetalStyles"):
+            raise RuntimeError("Active part is not a sheet metal part. "
+                               "Use create_document(kind='sheet_metal').")
+        if comp.SurfaceBodies.Count:
+            raise ValueError("sheet_profile starts a part, and this one already has a body.")
+        k = kind.upper()
+        t = comp.Thickness.Value * 10
+        if k in ("C", "Z", "HAT") and flange <= 0:
+            raise ValueError(f"A {kind} profile needs flange > 0.")
+        pts = self._profile_path(k, width, height, flange, t)
+        for p, q in zip(pts, pts[1:]):
+            if math.dist(p, q) <= 0:
+                raise ValueError(f"Sizes leave no leg between {p} and {q} at {t:g} mm thickness.")
+        sk = comp.Sketches.Add(comp.WorkPlanes.Item(3))
+        tg = self.app.TransientGeometry
+        first = sk.SketchLines.AddByTwoPoints(tg.CreatePoint2d(pts[0][0] / 10, pts[0][1] / 10),
+                                              tg.CreatePoint2d(pts[1][0] / 10, pts[1][1] / 10))
+        last = first
+        for x, y in pts[2:]:
+            last = sk.SketchLines.AddByTwoPoints(last.EndSketchPoint, tg.CreatePoint2d(x / 10, y / 10))
+        features = comp.Features.ContourFlangeFeatures
+        d = features.CreateContourFlangeDefinition(comp.Features.CreatePath(first))
+        if bend_radius:
+            d.BendRadius = bend_radius / 10
+        d.SetDistanceExtent(length / 10, kPositiveExtentDirection)
+        before = self._vol_state()
+        try:
+            feat = features.Add(d)
+        except Exception as e:
+            sk.Delete()
+            raise RuntimeError(f"Contour flange failed — is a leg too short for the bend radius? ({e})") from e
+        self.active_document().Update()
+        rb = comp.SurfaceBodies.Item(1).RangeBox
+        size = [(rb.MaxPoint.X - rb.MinPoint.X) * 10, (rb.MaxPoint.Y - rb.MinPoint.Y) * 10,
+                (rb.MaxPoint.Z - rb.MinPoint.Z) * 10]
+        want = [{"Z": flange + width - t, "HAT": 2 * flange + width}.get(k, width), height, length]
+        note = "" if all(abs(a - b) < 0.01 for a, b in zip(size, want)) else \
+            f"\nWARNING: outer size {[round(v, 2) for v in size]} mm, expected {want}."
+        return (f"{kind} profile {feat.Name}: {size[0]:g} x {size[1]:g} x {size[2]:g} mm, "
+                f"{t:g} mm sheet{self._fmt_delta(before)}{note}")
+
     # HeightDatumTypeEnum — how the flange height is measured
     _HEIGHT_DATUM = {"outer": 75521, "inner": 75522, "tangent": 75523,
                      "outer_ortho": 75524, "inner_ortho": 75525}
@@ -3700,6 +3765,94 @@ class InventorConnection:
             out += hits
         return out
 
+    def _leaf_volumes(self, comp) -> dict:
+        """Volume of every part occurrence as this assembly sees it (mm³): assembly cuts count."""
+        vols = {}
+        leaves = comp.Occurrences.AllLeafOccurrences
+        for i in range(1, leaves.Count + 1):
+            o = leaves.Item(i)
+            bodies = o.SurfaceBodies
+            vols[self._path_of(o)] = sum(bodies.Item(j).Volume(0.001) for j in range(1, bodies.Count + 1)) * 1000
+        return vols
+
+    # Sketch axes of the plane square to each world axis; x × y is the +axis direction
+    _CUT_PLANES = {"X": ((0, 1, 0), (0, 0, 1)), "Y": ((0, 0, 1), (1, 0, 0)), "Z": ((1, 0, 0), (0, 1, 0))}
+
+    def assembly_cut(self, axis: str = "z", circles: list | None = None, rectangles: list | None = None,
+                     at: float = 0, distance: float = 0, direction: str = "symmetric",
+                     participants: list[str] | None = None) -> str:
+        """Cut placed components in this assembly only: the part files stay as they are.
+        Shapes are in world mm and are projected onto the plane at `at` along `axis`."""
+        comp = self.active_assembly()
+        ax = axis.upper()
+        if ax not in self._CUT_PLANES:
+            raise ValueError(f"Unknown axis '{axis}'. Use x, y or z.")
+        if not circles and not rectangles:
+            raise ValueError("Nothing to cut: give circles and/or rectangles.")
+        extent = {"positive": kPositiveExtentDirection, "negative": kNegativeExtentDirection,
+                  "symmetric": kSymmetricExtentDirection}.get(direction.lower())
+        if extent is None:
+            raise ValueError(f"Unknown direction '{direction}'. Use positive, negative or symmetric.")
+        wanted = self._occ_set(participants) if participants else None
+        doc = self.active_document()
+        tg = self.app.TransientGeometry
+        n = "XYZ".index(ax)
+        origin = [at / 10 if i == n else 0 for i in range(3)]
+        xv, yv = self._CUT_PLANES[ax]
+        plane = comp.WorkPlanes.AddFixed(tg.CreatePoint(*origin), tg.CreateUnitVector(*xv), tg.CreateUnitVector(*yv))
+        plane.Visible = False
+        sk = comp.Sketches.Add(plane)
+
+        def on_sketch(p):
+            q = [v / 10 for v in p[:3]]
+            q[n] = at / 10
+            return sk.ModelToSketchSpace(tg.CreatePoint(*q))
+
+        for x, y, z, dia in circles or []:
+            sk.SketchCircles.AddByCenterRadius(on_sketch((x, y, z)), dia / 20)
+        for corners in rectangles or []:
+            first = sk.SketchLines.AddByTwoPoints(on_sketch(corners[0]), on_sketch(corners[1]))
+            line = first
+            for c in corners[2:]:
+                line = sk.SketchLines.AddByTwoPoints(line.EndSketchPoint, on_sketch(c))
+            sk.SketchLines.AddByTwoPoints(line.EndSketchPoint, first.StartSketchPoint)
+        features = comp.Features.ExtrudeFeatures
+        d = features.CreateExtrudeDefinition(sk.Profiles.AddForSolid(), kCutOperation)
+        if distance:
+            d.SetDistanceExtent(distance / 10, extent)
+        else:
+            d.SetThroughAllExtent(extent)
+        before = self._leaf_volumes(comp)
+        feat, cut = None, {}
+        try:
+            feat = features.Add(d)
+            if wanted is not None:
+                keep = {self._path_of(o) for o in wanted}
+                for o in list(feat.Participants):
+                    if self._path_of(o) not in keep:
+                        feat.RemoveParticipant(o)
+                have = {self._path_of(o) for o in feat.Participants}
+                for o in wanted:
+                    if self._path_of(o) not in have:
+                        feat.AddParticipant(o)
+            doc.Update()
+            after = self._leaf_volumes(comp)
+            cut = {p: before[p] - v for p, v in after.items() if before.get(p, v) - v > 0.01}
+        except Exception as e:
+            raise RuntimeError(f"Assembly cut failed, nothing was left behind — does the shape "
+                               f"meet a component? ({e})") from e
+        finally:
+            if not cut:
+                if feat is not None:
+                    feat.Delete()
+                sk.Delete()
+                plane.Delete()
+        if not cut:
+            raise RuntimeError("The cut removed no material from any component, so it was taken "
+                               "back. Check axis, at, direction and the coordinates.")
+        lines = "; ".join(f"{p} -{v:.0f} mm³" for p, v in cut.items())
+        return f"Assembly cut {feat.Name}: {lines}. Part files unchanged."
+
     @staticmethod
     def _is_fastener(occ) -> bool:
         """A small Content Center member — bolt, nut, washer, rivet."""
@@ -4221,6 +4374,20 @@ class InventorConnection:
         except Exception:
             return occ.Name
 
+    @staticmethod
+    def _moved(before: dict, after: dict, skip: set) -> list[str]:
+        """What changed between two _poses, leaving out the components in skip."""
+        moved = []
+        for p, m in after.items():
+            old = before.get(p)
+            if old is None or p in skip:
+                continue
+            d = [round(m[i] - old[i], 3) for i in (3, 7, 11)]
+            turned = any(abs(m[i] - old[i]) > 1e-4 for i in (0, 1, 2, 4, 5, 6, 8, 9, 10))
+            if any(abs(v) > 0.01 for v in d) or turned:
+                moved.append(f"{p} Δ({d[0]}, {d[1]}, {d[2]}) mm" + (" and turned" if turned else ""))
+        return moved
+
     def constrain_faces(self, a: str, b: str, kind: str = "mate", offset: float = 0,
                         angle: float = 0, a_at: dict | None = None, axes_opposed: bool = True) -> str:
         """Constrain two faces / origin geometries of components anywhere in the assembly
@@ -4277,17 +4444,7 @@ class InventorConnection:
                 health = f"\nConstraint health: {h} — it conflicts with others or can't be solved."
         except Exception:
             pass
-        after = self._poses(comp)
-        moved_self = {self._path_of(occ_a), self._path_of(occ_b)}
-        moved = []
-        for p, m in after.items():
-            old = before.get(p)
-            if old is None or p in moved_self:
-                continue
-            d = [round(m[i] - old[i], 3) for i in (3, 7, 11)]
-            turned = any(abs(m[i] - old[i]) > 1e-4 for i in (0, 1, 2, 4, 5, 6, 8, 9, 10))
-            if any(abs(v) > 0.01 for v in d) or turned:
-                moved.append(f"{p} Δ({d[0]}, {d[1]}, {d[2]}) mm" + (" and turned" if turned else ""))
+        moved = self._moved(before, self._poses(comp), {self._path_of(occ_a), self._path_of(occ_b)})
         also = ("\nALSO MOVED (other constraints dragged them): " + "; ".join(moved)) if moved else ""
         what = f"{angle}°" if k == "angle" else f"offset {-offset if flipped else offset}mm"
         return f"{k.capitalize()} '{c.Name}': {a} ↔ {b} ({what}){note}{health}{also}"
@@ -4411,9 +4568,50 @@ class InventorConnection:
         for i in range(1, comp.Constraints.Count + 1):
             c = comp.Constraints.Item(i)
             health = unhealthy(self.app, c)
-            lines.append(f"[{i}] {c.Name}" + (" (suppressed)" if c.Suppressed else "")
+            param = self._constraint_param(c)
+            lines.append(f"[{i}] {c.Name}" + (f" = {param.Expression}" if param else "")
+                         + (" (suppressed)" if c.Suppressed else "")
                          + (f" [{health}]" if health else ""))
         return "\n".join(lines) if lines else "(no constraints)"
+
+    @staticmethod
+    def _constraint_param(c):
+        """The parameter holding a constraint's offset or angle; None if it has neither."""
+        for name in ("Angle", "Offset", "Distance"):
+            try:
+                return getattr(c, name)
+            except Exception:
+                continue
+        return None
+
+    def edit_constraint(self, index: int, value: float, undo_if_moved: bool = False) -> str:
+        """New offset (mm) or angle (degrees) of a constraint, reporting what else moved."""
+        comp = self.active_assembly()
+        doc = self.active_document()
+        c = comp.Constraints.Item(index)
+        param = self._constraint_param(c)
+        if param is None:
+            raise ValueError(f"{c.Name} has no offset or angle to change.")
+        is_angle = param.Units.lower().startswith(("deg", "rad"))
+        old = param.Expression
+        before = self._poses(comp)
+        param.Value = math.radians(value) if is_angle else value / 10
+        doc.Update()
+        own = set()
+        for name in ("AffectedOccurrenceOne", "AffectedOccurrenceTwo"):
+            try:
+                own.add(self._path_of(getattr(c, name)))
+            except Exception:
+                pass
+        moved = self._moved(before, self._poses(comp), own)
+        if moved and undo_if_moved:
+            param.Expression = old
+            doc.Update()
+            return f"{c.Name} put back to {old}: it would have moved " + "; ".join(moved)
+        health = unhealthy(self.app, c)
+        return (f"{c.Name}: {old} → {value:g} {'deg' if is_angle else 'mm'}"
+                + (f"\nConstraint health: {health} — it conflicts with others or can't be solved." if health else "")
+                + ("\nALSO MOVED: " + "; ".join(moved) if moved else ""))
 
     def delete_constraint(self, index: int) -> str:
         comp = self.active_assembly()

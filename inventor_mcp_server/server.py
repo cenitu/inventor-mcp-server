@@ -1166,20 +1166,28 @@ def manage_materials(action: str = "report", material: str = "", search: str = "
 
 
 @tool()
-def manage_constraints(action: str = "list", index: int = 0) -> str:
-    """List the active assembly's constraints with their numbers, flagging any in an error
-    state; or delete one. To add one use constrain. Deleting frees the components it held, and
+def manage_constraints(action: str = "list", index: int = 0, value: float | None = None,
+                       undo_if_moved: bool = False) -> str:
+    """List the active assembly's constraints with their numbers and offsets, flagging any in an
+    error state; change one's offset or angle; or delete one. To add one use constrain. Editing
+    reports every other component it dragged along. Deleting frees the components it held, and
     the numbers after it shift — list again before deleting another.
 
     Args:
-        action: "list" or "delete".
-        index: For "delete": the constraint's number from list.
+        action: "list", "edit" or "delete".
+        index: For "edit" and "delete": the constraint's number from list.
+        value: For "edit": the new offset in mm, or angle in degrees. A formula it held is replaced.
+        undo_if_moved: For "edit": put the old value back if any other component would move.
     """
     if action.lower() == "list":
         return inv.list_constraints()
+    if action.lower() == "edit":
+        if value is None:
+            return "edit needs value: the new offset in mm, or angle in degrees."
+        return inv.edit_constraint(index, value, undo_if_moved)
     if action.lower() == "delete":
         return inv.delete_constraint(index)
-    return f"Unknown action '{action}': list or delete."
+    return f"Unknown action '{action}': list, edit or delete."
 
 
 @tool()
@@ -1332,6 +1340,29 @@ def sheet_metal_cut(sketch_index: int = 0, face_index: int = 0, circles: list | 
     if face_index:
         return inv.cut_on_face(face_index, circles or [], rectangles or [])
     return inv.sheet_metal_cut(sketch_index if sketch_index > 0 else None)
+
+
+@tool()
+def add_assembly_cut(axis: str = "z", circles: list | None = None, rectangles: list | None = None,
+                     at: float = 0, distance: float = 0, direction: str = "symmetric",
+                     participants: str = "") -> str:
+    """Cut through placed components at assembly level, for a hole drilled after assembly: the
+    cut lives in this assembly and the part files stay as they are. To change the part itself
+    for every use, cut it in the part (extrude, sheet_metal_cut). Returns the volume removed from
+    each component; a cut that removes nothing is taken back and reported as an error.
+
+    Args:
+        axis: World direction of the cut: "x", "y" or "z".
+        circles: [[x, y, z, diameter], ...] in world mm. The coordinate along axis is ignored.
+        rectangles: Lists of 4 corners, [[[x,y,z], [x,y,z], [x,y,z], [x,y,z]], ...], in world mm.
+        at: Where the sketch plane sits along axis, in mm. Matters when distance is set.
+        distance: Depth in mm from that plane; 0 = through everything.
+        direction: "symmetric" (both ways), "positive" (+axis) or "negative" (-axis).
+        participants: Comma-separated names, paths or patterns of the only components to cut,
+            e.g. "PANEL:1,*DOOR*"; empty = all that the shape meets.
+    """
+    names = [n.strip() for n in participants.split(",") if n.strip()]
+    return inv.assembly_cut(axis, circles, rectangles, at, distance, direction, names or None)
 
 
 @tool()
@@ -1791,6 +1822,26 @@ def add_sheet_metal_face(sketch_index: int = 0) -> str:
     """
     idx = sketch_index if sketch_index > 0 else None
     return inv.sheet_metal_face(idx)
+
+
+@tool()
+def add_sheet_profile(kind: str, width: float, height: float, length: float, flange: float = 0,
+                      bend_radius: float = 0) -> str:
+    """Make a whole bent profile — angle, channel, Z or hat — as one contour flange in an empty
+    sheet metal part, from outer sizes: section in the XY plane from 0,0, length along +Z. It
+    unfolds like any sheet metal part. Set the rule first (manage_sheet_metal_rules): thickness
+    comes from it. For a panel with walls use add_sheet_metal_face + add_flange.
+
+    Args:
+        kind: "L", "U", "C" (U with lips turned in), "Z" or "hat".
+        width: L: bottom leg. U, C: overall width. Z: top flange, measured over the web.
+            Hat: width of the crown. All mm.
+        height: Overall height in mm.
+        length: Length of the profile in mm.
+        flange: C: lip. Z: bottom flange, measured over the web. Hat: each brim. Ignored for L and U.
+        bend_radius: Inside radius in mm; 0 = from the rule.
+    """
+    return inv.sheet_profile(kind, width, height, length, flange, bend_radius)
 
 
 @tool()

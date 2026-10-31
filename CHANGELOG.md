@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `add_sheet_profile`: an L, U, C, Z or hat profile as one contour flange in an empty sheet metal
+  part, from outer sizes. The finished size is checked.
+- `add_assembly_cut`: cut placed components at assembly level, from world coordinates, on the
+  components that the shape meets or on a named set, sub-assembly parts included. Part files stay
+  as they are; the volume removed from each component is returned, and a cut that removes nothing
+  leaves nothing behind.
+- `manage_constraints`: `action="edit"` changes an offset or an angle and names every other
+  component that moved; `undo_if_moved` puts the old value back instead. `list` shows the values.
+
 ## 1.0.1 — 2026-11-01
 
 - Fuller descriptions for the seven tools that said least: `chamfer`, `fillet`, `extrude`,
