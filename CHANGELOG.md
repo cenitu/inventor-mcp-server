@@ -31,7 +31,8 @@ you do to one kind of object is grouped. **This breaks tool names** (table below
 
 ### Changed
 - **`save_document` saves only the active document** unless `save_dependents=True`; changed dependents
-  are listed. Library and Content Center files were already never saved.
+  are listed. Save-as is covered too: `Document.SaveAs` writes every dirty dependent — protected files
+  included — so they are held back for the moment of the save, and it refuses a protected target.
 - `capture_view`: `focus` is now `fit_to`, for several components.
 
 ### Added

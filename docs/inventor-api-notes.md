@@ -219,6 +219,13 @@ Tested on 2027.1 with a 100×60×20 box (120000 mm³) and a Ø40×30 cylinder:
 - Surfaces live in `WorkSurfaces`, not `SurfaceBodies`; a knit hides the WorkSurfaces it consumed.
 - A transient body's face can't be deleted (`Face.Delete` fails on TransientBRep copies).
 
+## What a save writes
+
+`Document.SaveAs(path, False)` on an assembly writes every dirty dependent to disk, Content Center
+and library files included (measured by file times). `Save2(False)` writes only the document. A
+dependent's `Dirty` can be set: `save_document` sets the ones it must not write to False for the
+moment of the save and back to True after, so their changes stay marked unsaved.
+
 ## Deleting occurrences, patterns
 
 - A component's pattern (`AssemblyComponentDefinition.OccurrencePatterns`) doesn't go with its parent:

@@ -669,7 +669,9 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
     Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
     directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
     Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
-    a dialog. A call longer than the wait limit keeps running; follow it with
+    a dialog. Save with the save_document tool or inv.save_document(): a plain doc.SaveAs
+    also writes every dirty dependent, protected and Content Center files included.
+    A call longer than the wait limit keeps running; follow it with
     manage_call(wait_seconds=30), which shows the prints so far; manage_call(action='cancel') stops it.
     Returns captured stdout + stderr (print your results!), or the traceback from your
     own code down on error (COM errors named: E_INVALIDARG, RPC_E_DISCONNECTED …).

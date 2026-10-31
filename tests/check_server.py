@@ -320,6 +320,12 @@ blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", 
 kinds = [getattr(b, "type", None) for b in blocks]
 check("capture_view reaches the client as images", kinds == ["image", "image"], str(kinds))
 
+os.environ["INVENTOR_MCP_PROTECTED"] = r"C:\vendor\*;D:\orig"
+reason = api_paths = importlib.import_module("inventor_mcp_server.inventor_api").InventorConnection._path_reason
+check("protected paths: a glob and a folder", reason(r"C:\vendor\a.ipt", []) == reason(r"D:\orig\b.iam", []) == "protected path"
+      and reason(r"C:\work\a.ipt", []) == "", str(reason(r"D:\orig\b.iam", [])))
+del os.environ["INVENTOR_MCP_PROTECTED"]
+
 print("Profiles with arcs (no Inventor needed):")
 import math
 api_mod = importlib.import_module("inventor_mcp_server.inventor_api")

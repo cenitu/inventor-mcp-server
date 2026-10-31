@@ -671,15 +671,19 @@ class InventorConnection:
                     return "Content Center member"
             except Exception:
                 pass
-        name = os.path.normcase(os.path.abspath(doc.FullFileName)) if doc.FullFileName else ""
+        return cls._path_reason(doc.FullFileName, folders) if doc.FullFileName else ""
+
+    @classmethod
+    def _path_reason(cls, path: str, folders) -> str:
+        """Why nothing may be written to path ('' if it may be)."""
+        import fnmatch
+        name = os.path.normcase(os.path.abspath(path))
         for f in folders:
-            if name and (name == f or name.startswith(f.rstrip("\\/") + os.sep)):
+            if name == f or name.startswith(f.rstrip("\\/") + os.sep):
                 return "library / Content Center folder"
-        if name:
-            import fnmatch
-            if any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(name, p.rstrip("\\/") + os.sep + "*")
-                   for p in cls.protected_patterns()):
-                return "protected path"
+        if any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(name, p.rstrip("\\/") + os.sep + "*")
+               for p in cls.protected_patterns()):
+            return "protected path"
         return ""
 
     def save_document(self, path: str | None = None, overwrite: bool = False,
@@ -706,9 +710,9 @@ class InventorConnection:
                                "really changed it.")
         target = os.path.abspath(path) if path else None
         if target:
-            name = os.path.normcase(target)
-            if any(name.startswith(f.rstrip("\\/") + os.sep) for f in folders):
-                raise RuntimeError(f"{target} is in a library / Content Center folder — save it elsewhere")
+            why = self._path_reason(target, folders)
+            if why:
+                raise RuntimeError(f"{target} is in a {why} — save it elsewhere")
             if self._check_save_path(doc, target, overwrite):
                 target = None  # its own file: save in place
         saved, skipped, failed = [], [], []
@@ -725,14 +729,23 @@ class InventorConnection:
                     saved.append(d.FullFileName)
                 except Exception as e:
                     failed.append(f"{d.DisplayName}: {describe_com_error(e)}")
-        if target:
-            self._silently(lambda: doc.SaveAs(target, False))
-            saved.insert(0, target)
-            msg = f"Saved as: {target}"
-        else:
-            self._silently(lambda: doc.Save2(False))
-            saved.insert(0, doc.FullFileName)
-            msg = f"Saved: {doc.FullFileName}"
+        # SaveAs under SilentOperation writes every dirty dependent too — protected files
+        # included. So what must not be written is marked clean for the moment of the save.
+        held = [d for d in doc.AllReferencedDocuments if d.Dirty]
+        for d in held:
+            d.Dirty = False
+        try:
+            if target:
+                self._silently(lambda: doc.SaveAs(target, False))
+                saved.insert(0, target)
+                msg = f"Saved as: {target}"
+            else:
+                self._silently(lambda: doc.Save2(False))
+                saved.insert(0, doc.FullFileName)
+                msg = f"Saved: {doc.FullFileName}"
+        finally:
+            for d in held:
+                d.Dirty = True
         if len(saved) > 1:
             msg += f"\nDependents saved ({len(saved) - 1}): " + ", ".join(saved[1:])
         if skipped:
