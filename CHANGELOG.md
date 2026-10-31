@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.0.0 — 2026-10-30
+
+One tool per job: **82 tools became 57**, with verb_noun names. Near-duplicates are merged and what
+you do to one kind of object is grouped. **This breaks tool names** (table below); `inv.*` methods in
+`execute_python` keep their names. Restart the client to get the new list.
+
+| Before | Now |
+|---|---|
+| `list_faces`, `find_face`, `assembly_faces` | `find_faces` (`path` empty = active part) |
+| `list_edges`, `find_edge`, `list_component_edges` | `find_edges` |
+| `inspect`, `assembly_info` | `inspect_model` |
+| `hole`, `hole_linear` | `add_hole` (`x`/`y`, `linear`, or new: `point` + `direction`) |
+| `cut_on_face`, `sheet_metal_cut` | `sheet_metal_cut` (`face_index` + `circles` / `rectangles`) |
+| `constrain`, `constrain_insert`, `constrain_faces` | `constrain(a, b, kind)` with refs |
+| `place_component`, `place_many` | `place_components` |
+| `create_part`, `create_assembly` | `create_document(kind)` |
+| `get_parameters`, `set_parameter`, `add_parameter` | `manage_parameters(action)` |
+| `list_features`, `delete_feature`, `suppress_feature` | `manage_features(action)` |
+| `list_constraints`, `delete_constraint` | `manage_constraints(action)` |
+| `list_occurrences`, `ground_occurrence`, `delete_occurrence` | `manage_occurrences(action)` |
+| `list_sheet_metal_rules`, `set_sheet_metal_rule`, `set_sheet_metal_thickness` | `manage_sheet_metal_rules(action)` |
+| `list_materials`, `set_material`, `material_report` | `manage_materials(action)` |
+| `list_documents`, `activate_document`, `close_unsaved` | `manage_documents(action)`, new: open, close, close_all |
+| `call_status`, `cancel_call` | `manage_call(action)` |
+| `status`, `properties`, `bom`, `flat_pattern` | `get_status`, `edit_properties`, `export_bom`, `export_flat_pattern` |
+| `view_image`, `make_drawing`, `content_center` | `capture_view`, `create_drawing`, `use_content_center` |
+| `sketch_pattern`, `frame_members`, `surface_to_solid` | `draw_pattern`, `add_frame_members`, `convert_surfaces_to_solid` |
+| `flange`, `sheet_metal_face`, `corner_round`, `circular_pattern` | `add_flange`, `add_sheet_metal_face`, `add_corner_round`, `add_circular_pattern` |
+
+### Changed
+- **`save_document` saves only the active document** unless `save_dependents=True`; changed dependents
+  are listed. Save-as is covered too: `Document.SaveAs` writes every dirty dependent — protected files
+  included — so they are held back for the moment of the save, and it refuses a protected target.
+- `capture_view`: `focus` is now `fit_to`, for several components.
+
+### Added
+- **Protected paths** — `INVENTOR_MCP_PROTECTED` (";"-separated globs) and
+  `~/.inventor-mcp/protected.txt` add to the library folders: vendor originals, other projects.
+  `manage_documents` marks protected documents.
+- **Deleting a component is safe.** `manage_occurrences(action="delete")` says what depends on it —
+  component patterns, constraints — and stops; `cascade=True` deletes the patterns too, `force=True`
+  deletes only it (a pattern's members don't go with their parent: they recompute somewhere else).
+  It reports components that moved, and names the open documents that block a delete.
+- **`place_components` is atomic** (one undo step: a failure leaves nothing, so running the list again
+  doesn't double it); `skip_if_exists` leaves out what already sits there.
+- **`manage_occurrences(action="find")`** — components by definition pattern, axis direction, distance
+  from a point.
+- **`add_hole(point, direction)`** — absolute coordinates; either way along the line, whichever removes
+  material; fails, leaving nothing behind, if none is removed.
+- **`manage_documents`**: `open`, `close`, `close_all` (refuses while your own files are unsaved;
+  protected ones don't count; `quit_inventor`).
+- **`check_interference`**: name patterns, full paths in the result, `ignore_fasteners`.
+- **`capture_view`**: `isolate` shows only the given components; the view is redrawn before the
+  picture, which made custom cameras unreliable.
+- **`load_library`** is remembered per project and comes back with a new server; it reports its time
+  and the slowest lines; `get_status` shows it.
+- `use_content_center`: a size that doesn't exist gets the closest ones.
+
 ## 0.9.0 — 2026-10-27
 
 ### Added

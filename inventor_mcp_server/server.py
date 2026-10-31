@@ -1,5 +1,6 @@
 """MCP Server for Autodesk Inventor parametric modeling."""
 
+import ast
 import asyncio
 import concurrent.futures
 import ctypes
@@ -38,9 +39,9 @@ mcp = FastMCP(
     instructions=(
         "MCP server for parametric 3D modeling in Autodesk Inventor. "
         "All dimensions are in millimeters. "
-        "Typical workflow: connect → create_part → create_sketch → draw geometry → extrude/revolve → save. "
-        "Assemblies: save the parts first, then create_assembly → place_component (ground the first one) "
-        "→ constrain by origin geometry / constrain_insert for bolt-in-hole. "
+        "Typical workflow: connect → create_document → create_sketch → draw geometry → extrude/revolve → save. "
+        "Assemblies: save the parts first, then create_document → place_components (ground the first one) "
+        "→ constrain by origin geometry / constrain(kind='insert') for bolt-in-hole. "
         "For anything not covered by a dedicated tool, use execute_python "
         "(persistent namespace, live inv/app/comp/body/tg objects). "
         "After editing inventor_api.py on disk, call reload_api — no server restart needed. "
@@ -74,9 +75,9 @@ class _ThreadStdout:
 
 class _LiveOutput:
     """execute_python's output buffer. Each write lands at once — nothing is held back
-    until the call ends — so call_status shows the prints of code that is still running.
+    until the call ends — so manage_call shows the prints of code that is still running.
     No lock: list.append and "".join are atomic under the GIL, and a lock held by the
-    Inventor thread could be left locked by cancel_call's KeyboardInterrupt."""
+    Inventor thread could be left locked by manage_call(action='cancel')'s KeyboardInterrupt."""
 
     def __init__(self):
         self.parts = []
@@ -149,6 +150,7 @@ class _Instance:
         self.project = ""               # active .ipj when last seen
         self.libraries: list[str] = []  # load_library files, rerun in a new namespace
         self.ns_ready = False           # startup file and libraries loaded
+        self.lib_status: dict = {}      # library path -> seconds, slowest lines, or failed
         self.lock = threading.Lock()    # two clients' calls arrive on two threads
         self.thread = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"inventor-{name}", initializer=self._init_thread)
@@ -382,7 +384,7 @@ def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
         c = inst.last_call
         if c is not None and not c.future.done():
             return (_busy_report(inst, c) + f"\nThis '{fn.__name__}' call was NOT started. "
-                    "Use call_status to follow the running call (cancel_call stops it).")
+                    "Use manage_call to follow the running call (manage_call(action='cancel') stops it).")
         blocker = _dialog_report(inst)
         if blocker:
             return blocker + f"\nThis '{fn.__name__}' call was NOT started. Retry once the dialog is closed."
@@ -393,7 +395,7 @@ def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
     except concurrent.futures.TimeoutError:
         call.timed_out = True
         return (_busy_report(inst, call) + _live_report(call) + "\nIt keeps running in the background — "
-                "call_status(wait_seconds=30) follows it and gets its result; cancel_call stops it.")
+                "manage_call(wait_seconds=30) follows it and gets its result; manage_call(action='cancel') stops it.")
 
 
 Instance = Annotated[str, Field(
@@ -443,7 +445,6 @@ def _call_status(inst: _Instance) -> str:
     return f"'{c.name}' finished after {took}:\n{result}"
 
 
-@tool(com=False)
 async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
     """Follow a call that outlived the wait (a long job, or one stuck behind an Inventor
     dialog): elapsed time, any open dialog's text, execute_python's progress() line and
@@ -451,7 +452,7 @@ async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
 
     Args:
         wait_seconds: Wait up to this long (at most 45 s) for the running call to finish
-            and return its result at once — instead of calling call_status again and again.
+            and return its result at once — instead of calling manage_call again and again.
             Without a name, waits until the first of the running calls finishes.
     """
     if instance or sum(i.attached for i in _instances.values()) <= 1:
@@ -471,7 +472,6 @@ async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
     return "\n\n".join(f"[{i.name}] {_call_status(i)}" for i in insts)
 
 
-@tool(com=False)
 async def cancel_call(instance: Instance = "") -> str:
     """Stop the running call — a long execute_python loop, a Content Center scan, a job
     that turned out wrong. cancelled() in execute_python code turns True at once (poll it
@@ -493,7 +493,7 @@ async def cancel_call(instance: Instance = "") -> str:
         await asyncio.to_thread(_interrupt_until_done, inst, c)
     if not c.future.done():
         return (_busy_report(inst, c) + "\nIt is inside a COM call (or behind a dialog) and stops once "
-                "that returns — follow it with call_status(wait_seconds=30).")
+                "that returns — follow it with manage_call(wait_seconds=30).")
     if c.timed_out:
         return _call_status(inst)
     return f"'{c.name}' stopped after {c.finished - c.started:.0f} s; the waiting call got its result."
@@ -530,6 +530,50 @@ def _run_source(me, source: str, filename: str | None = None):
     exec(compile(source, filename, "exec"), me.ns)
 
 
+LIBRARIES = os.path.join(os.path.expanduser("~"), ".inventor-mcp", "libraries.json")
+
+
+def _saved_libraries(project: str) -> list[str]:
+    """load_library files remembered for a project, so a new server loads them too."""
+    try:
+        with open(LIBRARIES, encoding="utf-8") as f:
+            return [p for p in json.load(f).get(project.lower(), []) if os.path.isfile(p)]
+    except (OSError, ValueError):
+        return []
+
+
+def _remember_library(project: str, path: str):
+    try:
+        with open(LIBRARIES, encoding="utf-8") as f:
+            known = json.load(f)
+    except (OSError, ValueError):
+        known = {}
+    paths = known.setdefault(project.lower(), [])
+    if path not in paths:
+        paths.append(path)
+        os.makedirs(os.path.dirname(LIBRARIES), exist_ok=True)
+        with open(LIBRARIES, "w", encoding="utf-8") as f:
+            json.dump(known, f, indent=1)
+
+
+def _run_library(me, path: str) -> dict:
+    """Run a library file statement by statement, timing each: where its load time goes."""
+    with open(path, encoding="utf-8") as f:
+        source = f.read()
+    linecache.cache[path] = (len(source), None, source.splitlines(True), path)
+    lines = source.splitlines()
+    t0 = time.monotonic()
+    times = []
+    for node in ast.parse(source, path).body:
+        t = time.monotonic()
+        exec(compile(ast.Module([node], []), path, "exec"), me.ns)
+        times.append((time.monotonic() - t, node.lineno))
+    me.lib_status[path] = {"seconds": round(time.monotonic() - t0, 1),
+                           "slowest": [f"line {n} ({s:.1f} s): {lines[n - 1].strip()[:60]}"
+                                       for s, n in sorted(times, reverse=True)[:3] if s >= 0.5]}
+    return me.lib_status[path]
+
+
 def _user_traceback(e: BaseException) -> str:
     """The traceback from the agent's own code down — not the server's frames above it."""
     tb = e.__traceback__
@@ -555,25 +599,26 @@ def _load_libraries(me) -> str:
         return ""
     me.ns_ready = True
     notes = []
+    me.libraries += [p for p in _saved_libraries(me.project) if p not in me.libraries]
     for path in ([STARTUP] if os.path.isfile(STARTUP) else []) + me.libraries:
         try:
-            with open(path, encoding="utf-8") as f:
-                _run_source(me, f.read(), path)
-            notes.append(f"(loaded {os.path.basename(path)})")
+            done = _run_library(me, path)
+            notes.append(f"(loaded {os.path.basename(path)} in {done['seconds']} s)")
         except Exception as e:
+            me.lib_status[path] = {"failed": str(e)[:200]}
             notes.append(f"(loading {path} failed:\n{_user_traceback(e)})")
     return "\n".join(notes)
 
 
 def _progress(msg) -> None:
-    """execute_python: a short status line call_status shows while the code runs."""
+    """execute_python: a short status line manage_call shows while the code runs."""
     call = getattr(_local, "call", None)
     if call is not None:
         call.progress = (time.monotonic(), str(msg)[:200])
 
 
 def _cancelled() -> bool:
-    """execute_python: True once cancel_call (or the timeout) asked this call to stop."""
+    """execute_python: True once manage_call(action='cancel') (or the timeout) asked this call to stop."""
     call = getattr(_local, "call", None)
     return call is not None and call.cancel.is_set()
 
@@ -614,18 +659,20 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
       doc  — active document          comp — its ComponentDefinition
       body — comp.SurfaceBodies.Item(1) (or None)
       tg   — TransientGeometry        math — math module
-      progress(msg) — status line call_status shows while a long job runs
-      cancelled()   — True once cancel_call asked to stop: poll it in long loops
+      progress(msg) — status line manage_call shows while a long job runs
+      cancelled()   — True once manage_call(action='cancel') asked to stop: poll it in long loops
     Variables you assign persist between calls until the server restarts or reload_api
-    runs — status shows the namespace's age and names. Each connected Inventor has its
+    runs — get_status shows the namespace's age and names. Each connected Inventor has its
     own namespace. Helpers you need every time: put them in a file and load_library it
     (or in ~/.inventor-mcp/startup.py) — they come back by themselves in a new namespace.
     Internal COM units are CENTIMETERS — divide mm by 10.
     Objects are late-bound: a Document from Documents.Open exposes ComponentDefinition
     directly. Don't use CastTo / gencache.EnsureDispatch (they create a gen_py cache).
     Runs with SilentOperation on, so Inventor answers its own prompts instead of opening
-    a dialog. A call longer than the wait limit keeps running; follow it with
-    call_status(wait_seconds=30), which shows the prints so far; cancel_call stops it.
+    a dialog. Save with the save_document tool or inv.save_document(): a plain doc.SaveAs
+    also writes every dirty dependent, protected and Content Center files included.
+    A call longer than the wait limit keeps running; follow it with
+    manage_call(wait_seconds=30), which shows the prints so far; manage_call(action='cancel') stops it.
     Returns captured stdout + stderr (print your results!), or the traceback from your
     own code down on error (COM errors named: E_INVALIDARG, RPC_E_DISCONNECTED …).
 
@@ -634,7 +681,7 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
         undo_on_error: Run inside one undo transaction on the active document and roll
             it back if the code raises — no half-built sketches or work planes left behind.
         timeout: Seconds; then cancelled() turns True, and the run is interrupted
-            CANCEL_GRACE s later if it hasn't stopped — as cancel_call does (0 = none).
+            CANCEL_GRACE s later if it hasn't stopped — as manage_call(action='cancel') does (0 = none).
     """
     me, call = _local.instance, _local.call
     error = _bind(me)
@@ -686,10 +733,10 @@ def execute_python(code: str, undo_on_error: bool = False, timeout: float = 0) -
 @tool()
 def load_library(path: str) -> str:
     """Run a Python file into this Inventor's execute_python namespace and keep it there:
-    after reload_api or a new namespace it is loaded again by itself. For helper functions
-    and cached objects (Content Center families…) you would otherwise redefine every time.
-    A file at ~/.inventor-mcp/startup.py (or INVENTOR_MCP_STARTUP) is loaded the same way
-    for every Inventor."""
+    after reload_api, a new namespace or a new server it is loaded again by itself (remembered
+    per project). For helper functions you would otherwise redefine every time. Says how long
+    it took and which lines were slowest — a COM call at module level is the usual culprit.
+    A file at ~/.inventor-mcp/startup.py (or INVENTOR_MCP_STARTUP) is loaded for every Inventor."""
     me = _local.instance
     path = os.path.abspath(path)
     if not os.path.isfile(path):
@@ -705,17 +752,18 @@ def load_library(path: str) -> str:
         if path not in me.libraries:
             me.libraries.append(path)
         try:
-            with open(path, encoding="utf-8") as f:
-                source = f.read()
-            inv._silently(lambda: _run_source(me, source, path))
+            done = inv._silently(lambda: _run_library(me, path))
         except Exception as e:
             me.libraries.remove(path)
             return buf.getvalue() + "ERROR:\n" + _user_traceback(e)
     finally:
         _release()
+    _remember_library(me.project, path)
     new = sorted(k for k in set(me.ns) - before if not k.startswith("__"))
     out = buf.getvalue().strip()
-    return (out + "\n" if out else "") + f"Loaded {os.path.basename(path)}: {', '.join(new) or 'no new names'}"
+    return ((out + "\n" if out else "") + f"Loaded {os.path.basename(path)} in {done['seconds']} s: "
+            + (", ".join(new[:40]) or "no new names")
+            + ("\nSlowest: " + "; ".join(done["slowest"]) if done["slowest"] else ""))
 
 
 @tool()
@@ -736,9 +784,9 @@ def reload_api() -> str:
 
 
 @tool()
-def view_image(views: str = "iso", width: int = 800, height: int = 600,
-               background: str = "inventor", focus: str = "", sketches: bool = False,
-               up: str = "y"):
+def capture_view(views: str = "iso", width: int = 800, height: int = 600,
+                 background: str = "inventor", fit_to: str = "", isolate: str = "",
+                 sketches: bool = False, up: str = "y"):
     """Look at the model: pictures of the active document, returned as images you can see.
     Use it to check your work — a flange on the wrong side, a door opening the wrong way,
     a part floating off the frame — which the numbers alone don't show.
@@ -748,13 +796,15 @@ def view_image(views: str = "iso", width: int = 800, height: int = 600,
                right, current (the user's view). E.g. "iso,front,top".
         width, height: Pixels per picture (keep them modest — each picture costs tokens).
         background: "inventor" (its gradient) or "white".
-        focus: Assembly component name — zoom to it, keeping each view's direction.
+        fit_to: Assembly component paths, ","-separated — zoom to them, keeping each view's direction.
+        isolate: Component paths, ","-separated — show only these (and what is inside them);
+                 the others are hidden for the picture. For details buried in an assembly.
         sketches: Show sketches and work features too (hidden by default; restored after).
         up: "y" = Inventor's own view names (its default templates have Y up); "z" for a
             model built with Z up (frames, buildings): front looks along +Y, top down -Z.
     """
     names = [v.strip().lower() for v in views.split(",") if v.strip()]
-    paths = inv.view_images(names, width, height, background.lower() == "white", focus, sketches, up)
+    paths = inv.view_images(names, width, height, background.lower() == "white", fit_to, sketches, up, isolate)
     images = []
     for path in paths:
         with open(path, "rb") as f:
@@ -762,28 +812,6 @@ def view_image(views: str = "iso", width: int = 800, height: int = 600,
         os.remove(path)
     os.rmdir(os.path.dirname(paths[0]))
     return images
-
-
-@tool()
-def inspect() -> str:
-    """Compact snapshot of the active part: volume, bbox, faces/edges count,
-    feature tree with names, sketches, sheet metal thickness. One call instead
-    of several diagnostic queries."""
-    return json.dumps(inv.inspect(), indent=1, ensure_ascii=False)
-
-
-@tool()
-def list_edges(min_length: float = 0, max_count: int = 60) -> str:
-    """Compact edge table of body 1: '[i] L=200.0 mid=(0.0,-225.0,0.8)' per line.
-    Use to locate edges for flange/fillet/chamfer. min_length filters small edges (mm)."""
-    return inv.list_edges(min_length=min_length, max_count=max_count)
-
-
-@tool()
-def list_faces(min_area: float = 0, max_count: int = 60) -> str:
-    """Compact face table of body 1: '[i] Plane A=90000 c=(0.0,225.0,12.5)' per line.
-    Use to locate faces for sketching/cuts. min_area filters small faces (mm²)."""
-    return inv.list_faces(min_area=min_area, max_count=max_count)
 
 
 @tool()
@@ -962,7 +990,7 @@ def _list_instances() -> str:
 
 
 @tool()
-def status() -> str:
+def get_status() -> str:
     """Check connection status, active document info, and the execute_python
     namespace (age, names you defined — gone after a server restart or reload_api).
     If Inventor is busy or showing a dialog, says so instead."""
@@ -980,34 +1008,400 @@ def status() -> str:
     info["python_namespace"] = {
         "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(me.ns_created)),
         "names": defined,
-        "libraries": [os.path.basename(p) for p in
-                      ([STARTUP] if os.path.isfile(STARTUP) else []) + me.libraries],
+        "libraries": {os.path.basename(p): me.lib_status.get(p, "not loaded yet — the next execute_python loads it")
+                      for p in ([STARTUP] if os.path.isfile(STARTUP) else [])
+                      + me.libraries + [q for q in _saved_libraries(me.project) if q not in me.libraries]},
     }
     unsaved = inv.unsaved_documents()
     if unsaved:
-        info["never_saved_documents"] = unsaved + ["(close_unsaved closes the ones nothing references)"]
+        info["never_saved_documents"] = unsaved + ["(manage_documents closes the ones nothing references)"]
     return json.dumps(info, indent=2, ensure_ascii=False)
+
+
+# ---------- Finding geometry ----------
+
+@tool()
+def find_faces(path: str = "", surface: str = "", normal: list[float] | None = None,
+               at: dict | None = None, diameter: float = 0, min_area: float = 0,
+               max_count: int = 30) -> str:
+    """Find faces, filtered by type, direction, position or size. Without `path`: the active
+    part (the `index` feeds create_sketch, sheet_metal_cut). With `path`: a component of the
+    active assembly at any depth, in TOP assembly coordinates, with a `ref` ("Sub:1/Part:1#F12")
+    for constrain; a sub-assembly path searches every part in it.
+
+    Args:
+        path: Component path (manage_occurrences list, depth=2). Empty = the active part.
+        surface: "plane", "cylinder", "cone", … (empty = any).
+        normal: Outward normal of a plane, e.g. [0, 0, 1] for faces looking up.
+        at: Face center coordinates to match, e.g. {"Z": 182.5}.
+        diameter: Cylinder diameter in mm.
+        min_area: Skip faces smaller than this (mm²).
+        max_count: Most results to return.
+    """
+    return json.dumps(inv.find_faces(path, surface, normal, at, diameter, min_area, max_count),
+                      indent=1, ensure_ascii=False)
+
+
+@tool()
+def find_edges(path: str = "", at: dict | None = None, circular: bool = False, diameter: float = 0,
+               min_length: float = 0, max_count: int = 40) -> str:
+    """Find edges, filtered by position or type. Without `path`: the active part (the `index`
+    feeds add_flange, fillet, chamfer). With `path`: a component at any depth, with a `ref`
+    ("Sub:1/Bolt:1#E4") — circular ones feed constrain(kind="insert").
+
+    Args:
+        path: Component path (manage_occurrences list, depth=2). Empty = the active part.
+        at: Edge midpoint coordinates to match (circle: its center), e.g. {"X": 50, "Z": 1.5}.
+        circular: Only circular edges.
+        diameter: Circle diameter in mm.
+        min_length: Skip edges shorter than this (mm).
+        max_count: Most results to return.
+    """
+    return json.dumps(inv.find_edges(path, at, circular, diameter, min_length, max_count),
+                      indent=1, ensure_ascii=False)
+
+
+@tool()
+def inspect_model() -> str:
+    """Snapshot of the active document in one call. Part: volume, bounding box, face and edge
+    counts, feature tree, sketches, sheet metal thickness, warnings (faceted curves, surface
+    bodies). Assembly: components with positions, constraint count, mass, volume."""
+    return json.dumps(inv.inspect_model(), indent=1, ensure_ascii=False)
+
+
+# ---------- Managing what is in a document ----------
+
+@tool()
+def manage_features(action: str = "list", indices: str = "") -> str:
+    """List, delete or suppress the active part's features.
+
+    Args:
+        action: "list", "delete", "suppress" or "unsuppress".
+        indices: Feature indices from list, comma-separated, e.g. "3,4,5".
+    """
+    a = action.lower()
+    if a == "list":
+        return json.dumps(inv.list_features(), indent=2, ensure_ascii=False)
+    idx = [int(i) for i in indices.replace(" ", "").split(",") if i]
+    if not idx:
+        return f"{a} needs indices — see action='list'."
+    if a == "delete":
+        return inv.delete_feature(idx)
+    if a in ("suppress", "unsuppress"):
+        return inv.suppress_feature(idx, a == "suppress")
+    return f"Unknown action '{action}': list, delete, suppress or unsuppress."
+
+
+@tool()
+def manage_parameters(action: str = "get", name: str = "", expression: str = "", units: str = "mm") -> str:
+    """Read, change or add parameters of the active document.
+
+    Args:
+        action: "get" (all), "set" or "add".
+        name: Parameter name, e.g. "width".
+        expression: Value or expression, e.g. "50 mm", "width * 2".
+        units: For "add": mm, cm, m, deg, …
+    """
+    a = action.lower()
+    if a == "get":
+        return json.dumps(inv.get_parameters(), indent=2, ensure_ascii=False)
+    if a == "set":
+        return inv.set_parameter(name, expression)
+    if a == "add":
+        return inv.add_parameter(name, expression, units)
+    return f"Unknown action '{action}': get, set or add."
+
+
+@tool()
+def manage_sheet_metal_rules(action: str = "list", name: str = "", thickness: float = 0) -> str:
+    """Sheet metal rules of the active part. Shops encode their tooling in rule names (e.g.
+    'T15-V10' = 1.5 mm sheet, V10 die): prefer "set" — it sets thickness, bend radius and unfold
+    method together; "thickness" changes only the thickness.
+
+    Args:
+        action: "list", "set" or "thickness".
+        name: Rule name for "set" (case-insensitive).
+        thickness: mm, for "thickness".
+    """
+    a = action.lower()
+    if a == "list":
+        return json.dumps(inv.list_sheet_metal_rules(), indent=1, ensure_ascii=False)
+    if a == "set":
+        return inv.set_sheet_metal_rule(name)
+    if a == "thickness":
+        return inv.set_sheet_metal_thickness(thickness)
+    return f"Unknown action '{action}': list, set or thickness."
+
+
+@tool()
+def manage_materials(action: str = "report", material: str = "", search: str = "", parts: str = "*",
+                     only_generic: bool = False, path: str = "", only_problems: bool = False) -> str:
+    """Materials of many parts at once.
+
+    "report": material and mass of every part of the active assembly (or part): counts per
+    material, total mass, and what needs a look — parts left on Generic, vendor models made of
+    surfaces (no volume, mass too low), parts with no mass.
+    "list": material names in Inventor's libraries (`search` narrows them).
+    "set": give `material` to every part whose name matches `parts`. Content Center and library
+    parts are left alone. Save afterwards.
+
+    Args:
+        action: "report", "list" or "set".
+        material: From the library, e.g. "Steel, Mild".
+        search: For "list", e.g. "steel".
+        parts: Name patterns, ","-separated, e.g. "*PLATE*,*BRACKET*".
+        only_generic: "set" only parts still on Generic / Default.
+        path: Limit "report" / "set" to a sub-assembly.
+        only_problems: "report" without the per-part rows.
+    """
+    a = action.lower()
+    if a == "report":
+        return json.dumps(inv.material_report(path, only_problems), indent=1, ensure_ascii=False)
+    if a == "list":
+        names = inv.list_materials(search)
+        return f"{len(names)} material(s): " + ", ".join(names[:150]) + (" …" if len(names) > 150 else "")
+    if a == "set":
+        return inv.set_material(material, parts, only_generic, path)
+    return f"Unknown action '{action}': report, list or set."
+
+
+@tool()
+def manage_constraints(action: str = "list", index: int = 0) -> str:
+    """List the active assembly's constraints, or delete one.
+
+    Args:
+        action: "list" or "delete".
+        index: Constraint index from list.
+    """
+    if action.lower() == "list":
+        return inv.list_constraints()
+    if action.lower() == "delete":
+        return inv.delete_constraint(index)
+    return f"Unknown action '{action}': list or delete."
+
+
+@tool()
+def manage_occurrences(action: str = "list", path: str = "", depth: int = 1,
+                       definition: str = "", axis: list[float] | None = None,
+                       near: list[float] | None = None, within: float = 0,
+                       grounded: bool = True, cascade: bool = False, force: bool = False) -> str:
+    """Components of the active assembly.
+
+    "list": a table with positions; depth=2 also lists what is inside sub-assemblies, with paths.
+    "find": components by what they are and where — definition name pattern, the direction of
+    their Z axis, distance from a point. E.g. definition="*ISO 4017*M8*", axis=[0,0,1].
+    "ground": fix a component in space (grounded=False releases it). Ground the first one.
+    "delete": says first what depends on it (patterns, constraints) and stops; force=True
+    deletes, cascade=True also deletes pattern members. Reports components that moved.
+
+    Args:
+        action: "list", "find", "ground" or "delete".
+        path: Component name, path ("Sub:1/Part:1") or list index.
+        depth: For "list".
+        definition: For "find": name pattern on the part / file name.
+        axis: For "find": direction of the component's Z axis, either way along it.
+        near: For "find": a point [x, y, z] in mm.
+        within: For "find": largest distance from `near`, mm.
+        grounded: For "ground".
+        cascade: For "delete".
+        force: For "delete".
+    """
+    a = action.lower()
+    if a == "list":
+        return inv.list_occurrences(depth)
+    if a == "find":
+        return json.dumps(inv.find_occurrences(definition, axis, near, within), indent=1, ensure_ascii=False)
+    if a == "ground":
+        return inv.ground_occurrence(path, grounded)
+    if a == "delete":
+        return inv.delete_occurrence(path, cascade, force)
+    return f"Unknown action '{action}': list, find, ground or delete."
+
+
+@tool()
+def manage_documents(action: str = "list", name_or_path: str = "", include_active: bool = False,
+                     discard: bool = False, quit_inventor: bool = False) -> str:
+    """Open documents of this Inventor.
+
+    "list": name, type, dirty, active; protected (library / Content Center) ones marked.
+    "open": a file by path. "activate": switch by name or path. "close": one, without saving
+    unless it is yours and dirty (discard=True closes it anyway).
+    "close_unsaved": documents never saved (Part12… left by failed attempts).
+    "close_all": everything; refuses while your own files have unsaved changes, listing them
+    (discard=True closes anyway; protected files never count). quit_inventor=True quits after.
+
+    Args:
+        action: "list", "open", "activate", "close", "close_unsaved" or "close_all".
+        name_or_path: For open / activate / close.
+        include_active: "close_unsaved" also closes the active document.
+        discard: Close without saving your changes.
+        quit_inventor: "close_all" then quits this Inventor.
+    """
+    a = action.lower()
+    if a == "list":
+        return json.dumps(inv.list_documents(), indent=1, ensure_ascii=False)
+    if a == "open":
+        return inv.open_document(name_or_path)
+    if a == "activate":
+        return inv.activate_document(name_or_path)
+    if a == "close":
+        return inv.close_document(name_or_path, discard)
+    if a == "close_unsaved":
+        return inv.close_unsaved(include_active)
+    if a == "close_all":
+        return inv.close_all(discard, quit_inventor)
+    return f"Unknown action '{action}': list, open, activate, close, close_unsaved or close_all."
+
+
+# ---------- Creating ----------
+
+@tool()
+def create_document(kind: str = "part", name: str = "", template: str = "metric", material: str = "",
+                    part_number: str = "", description: str = "") -> str:
+    """Create a new document — a part with its material and part number right away, so no part
+    is left "Generic" for the BOM and the mass.
+
+    Args:
+        kind: "part", "sheet_metal" or "assembly".
+        name: Display name (optional).
+        template: "metric" (mm, default), "english" (inches), or a full path to a template file.
+        material: Parts: from the library, e.g. "Steel, Mild".
+        part_number, description: Parts: iProperties for the BOM.
+    """
+    k = kind.lower().replace("-", "_").replace(" ", "_")
+    if k == "assembly":
+        return inv.create_assembly(name or None, template)
+    if k not in ("part", "sheet_metal"):
+        return f"Unknown kind '{kind}': part, sheet_metal or assembly."
+    return inv.create_part(name or None, "sheet_metal" if k == "sheet_metal" else template,
+                           material, part_number, description)
+
+
+@tool()
+def add_hole(diameter: float = 10, depth: float = 0, tapped: bool = False, pitch: float = 0,
+             x: float = 0, y: float = 0, point: list[float] | None = None,
+             direction: list[float] | None = None, linear: dict | None = None,
+             cbore_diameter: float = 0, cbore_depth: float = 0) -> str:
+    """Add a native hole feature to the active part (drilled, tapped ISO metric 6H, counterbored).
+    Fails — instead of leaving an empty feature — if no material was removed. Placed one of three ways:
+
+    - `point` + `direction`: absolute model coordinates, e.g. point=[30,0,12], direction=[0,0,-1]
+      (the way the drill travels). Safest: no sketch axes involved.
+    - `linear`: dimensioned from two edges of a face, associative — preferred for fastener holes:
+      {"face_axis": "Z", "face_value": 20, "ref1_axis": "X", "ref1_value": 0, "dist1": 10,
+       "ref2_axis": "Y", "ref2_value": 0, "dist2": 15}.
+    - `x`, `y`: on the XY plane, drilling into +Z.
+
+    Args:
+        diameter: mm (thread nominal if tapped, e.g. 5 for M5).
+        depth: mm; 0 = through all.
+        tapped: Thread it.
+        pitch: mm; 0 = standard coarse.
+        cbore_diameter, cbore_depth: Counterbore seat (with linear), e.g. 10 and 5.5 for M5.
+    """
+    p = pitch if pitch > 0 else None
+    if point is not None:
+        if direction is None:
+            return "point needs a direction, e.g. direction=[0, 0, -1] (the way the drill travels)."
+        return inv.hole_along(point, direction, diameter, depth, tapped, p)
+    if linear:
+        return inv.hole_linear(linear["face_axis"], linear["face_value"], linear["ref1_axis"],
+                               linear["ref1_value"], linear["dist1"], linear["ref2_axis"],
+                               linear["ref2_value"], linear["dist2"], diameter, depth, tapped, p,
+                               cbore_diameter, cbore_depth)
+    return inv.hole(x, y, diameter, depth, tapped, p)
+
+
+@tool()
+def sheet_metal_cut(sketch_index: int = 0, face_index: int = 0, circles: list | None = None,
+                    rectangles: list | None = None) -> str:
+    """Cut through a sheet metal panel — depth follows the thickness, so it stays parametric.
+    Checks that material was removed (a cut sketched on a work plane silently removes nothing).
+
+    From a sketch on the panel face: one sketch with several closed shapes = several holes.
+    Or at WORLD coordinates, with no sketch axes to think about: face_index + circles / rectangles.
+
+    Args:
+        sketch_index: Sketch number (0 = latest).
+        face_index: Face of the sheet (find_faces), for circles / rectangles.
+        circles: [[x, y, z, diameter], ...], e.g. [[180, 267, 0, 4.9]].
+        rectangles: Lists of 4 corners, [[[x,y,z], [x,y,z], [x,y,z], [x,y,z]], ...].
+    """
+    if face_index:
+        return inv.cut_on_face(face_index, circles or [], rectangles or [])
+    return inv.sheet_metal_cut(sketch_index if sketch_index > 0 else None)
+
+
+@tool()
+def place_components(components: list[dict], atomic: bool = True, skip_if_exists: bool = False) -> str:
+    """Place parts / sub-assemblies into the active assembly — one or hundreds in one call. Files
+    must exist on disk (save_document first); all are checked before anything is placed.
+
+    Args:
+        components: [{"path": "C:/.../beam.ipt", "x": 0, "y": 0, "z": 0, "x_axis": [1,0,0],
+                      "y_axis": [0,1,0], "grounded": false, "name": "Beam_A1"}, ...]. mm.
+                      "origin": [x,y,z] works too. Axes and name are optional (where the part's own
+                      X/Y point; give both). Ground the first component of every assembly.
+        atomic: One undo step: if any placement fails, none stay.
+        skip_if_exists: Don't place one where the same file already sits at the same place —
+                        safe to run a list again after an error.
+    """
+    return inv.place_many(components, atomic, skip_if_exists)
+
+
+@tool()
+def constrain(a: str, b: str, kind: str = "mate", offset: float = 0, angle: float = 0,
+              a_at: dict | None = None, axes_opposed: bool = True) -> str:
+    """Constrain two components, at any depth — by origin geometry, faces or circular edges. Prefer
+    origin geometry: it survives part edits; face and edge numbers change with the topology.
+
+    References: "Part:1#XY" / "#XZ" / "#YZ" / "#X" / "#Y" / "#Z" / "#ORIGIN" (origin geometry),
+    "Sub:1/Part:1#F12" (face, from find_faces), "Sub:1/Bolt:1#E4" (edge, from find_edges).
+    A list index works as the component: "2#XY".
+
+    Says which OTHER components the constraint moved — one can drag parts you didn't mean to touch.
+
+    Args:
+        a, b: References; a is the one meant to move.
+        kind: "mate" (faces against each other, axes in line), "flush" (faces the same way),
+              "angle", or "insert" (two circular edges: a bolt into a hole).
+        offset: mm for mate / flush / insert. Its sign is easy to get wrong — give a_at too.
+        angle: Degrees for kind="angle".
+        a_at: Where a's face must end up, e.g. {"Z": 182.5}. If it lands elsewhere, the offset is
+              tried with the other sign.
+        axes_opposed: For insert: True = the components face each other (normal bolt / hole case).
+    """
+    return inv.constrain_faces(a, b, kind, offset, angle, a_at, axes_opposed)
+
+
+# ---------- The call in progress ----------
+
+@tool(com=False)
+async def manage_call(action: str = "status", wait_seconds: float = 0, instance: Instance = "") -> str:
+    """Follow or stop a call that outlived the wait — a long execute_python, a Content Center scan,
+    one stuck behind an Inventor dialog.
+
+    "status": elapsed time, any open dialog's text, output so far, progress() line — and the
+    result once it has finished. wait_seconds waits (at most 45 s) and returns as soon as it ends.
+    "cancel": cancelled() in execute_python code turns True at once; code still running after 2 s
+    gets a KeyboardInterrupt, repeated until it stops. That lands at the next Python line: a call
+    stuck INSIDE one COM operation or behind a dialog stops only once that returns.
+
+    Args:
+        action: "status" or "cancel".
+        wait_seconds: For "status".
+    """
+    if action.lower() == "cancel":
+        return await cancel_call(instance)
+    if action.lower() == "status":
+        return await call_status(wait_seconds, instance)
+    return f"Unknown action '{action}': status or cancel."
 
 
 # ---------- Document management ----------
 
 @tool()
-def create_part(name: str = "", template: str = "metric", material: str = "",
-                part_number: str = "", description: str = "") -> str:
-    """Create a new empty part document — with its material and part number right away, so
-    no part is left "Generic" for the BOM and the mass.
-
-    Args:
-        name: Display name for the part (optional).
-        template: Template type — "metric" (mm, default), "english" (inches), or full path to .ipt file.
-        material: Material from the library (list_materials), e.g. "Steel, Mild".
-        part_number, description: iProperties for the BOM.
-    """
-    return inv.create_part(name or None, template, material, part_number, description)
-
-
-@tool()
-def save_document(path: str = "", overwrite: bool = False, save_dependents: bool = True) -> str:
+def save_document(path: str = "", overwrite: bool = False, save_dependents: bool = False) -> str:
     """Save the active document — never opens a dialog, and never writes a library or
     Content Center file. Dependents that changed (e.g. sub-assemblies, edited parts) are
     saved one by one first, except files in the project's library paths or Content Center
@@ -1024,30 +1418,6 @@ def save_document(path: str = "", overwrite: bool = False, save_dependents: bool
             dependents stay unsaved and are listed.
     """
     return inv.save_document(path or None, overwrite, save_dependents)
-
-
-@tool()
-def close_unsaved(include_active: bool = False) -> str:
-    """Close documents that were never saved (Part12, Assembly3… left by failed attempts)
-    without saving. Ones another open document references are kept.
-
-    Args:
-        include_active: Close the active document too if it was never saved.
-    """
-    return inv.close_unsaved(include_active)
-
-
-@tool()
-def list_documents() -> str:
-    """List open documents (name, path, type, unsaved changes) and which one is active.
-    Tools act on the ACTIVE document — check here when juggling several parts."""
-    return json.dumps(inv.list_documents(), indent=1, ensure_ascii=False)
-
-
-@tool()
-def activate_document(name_or_path: str) -> str:
-    """Make an open document the active one (by display name or full path)."""
-    return inv.activate_document(name_or_path)
 
 
 @tool()
@@ -1222,7 +1592,7 @@ def draw_slot(x: float, y: float, length: float, width: float, angle: float = 0,
 
 
 @tool()
-def sketch_pattern(shape: str = "circle", diameter: float = 0, length: float = 0,
+def draw_pattern(shape: str = "circle", diameter: float = 0, length: float = 0,
                    width: float = 0, corner_radius: float = 0, angle: float = 0,
                    x: float = 0, y: float = 0, rows: int = 1, columns: int = 1,
                    dx: float = 0, dy: float = 0, count: int = 0, pcd: float = 0,
@@ -1279,8 +1649,8 @@ def project_edges(face_index: int = 0, edge_indices: str = "", body_index: int =
     an imported part) instead of re-tracing curves point by point.
 
     Args:
-        face_index: Project every edge of this face of the body (list_faces).
-        edge_indices: Or these edges, "3,7,8" (list_edges).
+        face_index: Project every edge of this face of the body (find_faces).
+        edge_indices: Or these edges, "3,7,8" (find_edges).
         body_index: Body in a multi-body part (1 = first).
         sketch_index: Sketch number (0 = latest sketch).
     """
@@ -1347,7 +1717,7 @@ def fillet(radius: float = 2, edge_indices: str = "1") -> str:
 
     Args:
         radius: Fillet radius in mm.
-        edge_indices: Comma-separated edge indices (e.g. "1,2,3"). Use status() to see edge count.
+        edge_indices: Comma-separated edge indices (e.g. "1,2,3"). find_edges lists them.
     """
     indices = [int(i.strip()) for i in edge_indices.split(",")]
     return inv.fillet(radius, indices)
@@ -1366,70 +1736,14 @@ def chamfer(distance: float = 2, edge_indices: str = "1") -> str:
 
 
 @tool()
-def hole(
-    x: float = 0, y: float = 0,
-    diameter: float = 10,
-    depth: float = 0,
-    tapped: bool = False,
-    pitch: float = 0,
-) -> str:
-    """Create a native Inventor HoleFeature. Dimensions in mm.
-    Creates a proper Hole feature (not extrude cut) — works with circular_pattern.
-    Supports both plain drilled holes and tapped (threaded) metric holes.
-
-    Args:
-        x: Hole center X in mm.
-        y: Hole center Y in mm.
-        diameter: Hole diameter in mm. For tapped holes this is the nominal thread diameter (e.g. 16 for M16).
-        depth: Hole depth in mm. 0 = through-all (default).
-        tapped: True = create tapped (threaded) hole with ISO Metric profile (6H). False = plain drilled hole.
-        pitch: Thread pitch in mm (e.g. 2.0 for M16x2). 0 = auto-select standard coarse pitch.
-    """
-    p = pitch if pitch > 0 else None
-    return inv.hole(x, y, diameter, depth, tapped, p)
-
-
-@tool()
-def hole_linear(
-    face_axis: str, face_value: float,
-    ref1_axis: str, ref1_value: float, dist1: float,
-    ref2_axis: str, ref2_value: float, dist2: float,
-    diameter: float = 5.5,
-    depth: float = 0,
-    tapped: bool = False,
-    pitch: float = 0,
-    cbore_diameter: float = 0,
-    cbore_depth: float = 0,
-) -> str:
-    """Hole placed parametrically from two edges of a face (Linear placement).
-    Survives part resizing — hole keeps its distance from the edges.
-    Drill direction resolved automatically (volume check).
-
-    Args:
-        face_axis/face_value: planar face to drill into, e.g. ("z", 25) = top face at Z=25mm.
-        ref1_axis/ref1_value/dist1: first edge of that face + distance from it, e.g. ("x", -34.5, 8).
-        ref2_axis/ref2_value/dist2: second edge + distance.
-        diameter: hole diameter mm (or thread nominal if tapped, e.g. 5 for M5).
-        depth: 0 = through-all, otherwise depth in mm.
-        tapped: True = ISO metric thread 6H (standard coarse pitch unless pitch given).
-        pitch: thread pitch mm (0 = auto standard coarse).
-        cbore_diameter/cbore_depth: >0 adds counterbore seat (M5 ISO 4762: 10 and 5.5).
-    """
-    p = pitch if pitch > 0 else None
-    return inv.hole_linear(face_axis, face_value, ref1_axis, ref1_value, dist1,
-                           ref2_axis, ref2_value, dist2, diameter, depth,
-                           tapped, p, cbore_diameter, cbore_depth)
-
-
-@tool()
-def circular_pattern(
+def add_circular_pattern(
     feature_index: int,
     count: int = 8,
     angle: float = 360,
     axis: str = "Z",
 ) -> str:
     """Create a circular (rotational) pattern of a feature around a work axis.
-    Ideal for bolt holes around a flange — one hole + circular_pattern instead of 8 holes.
+    Ideal for bolt holes around a flange — one hole + add_circular_pattern instead of 8 holes.
 
     Args:
         feature_index: Index of the feature to pattern (from list_features()).
@@ -1442,65 +1756,10 @@ def circular_pattern(
 
 # ---------- Parameters ----------
 
-@tool()
-def get_parameters() -> str:
-    """Get all parameters of the active document. Returns JSON list."""
-    params = inv.get_parameters()
-    return json.dumps(params, indent=2, ensure_ascii=False)
-
-
-@tool()
-def set_parameter(name: str, expression: str) -> str:
-    """Set a parameter value by name.
-
-    Args:
-        name: Parameter name (e.g. "d0", "width").
-        expression: New value or expression (e.g. "50 mm", "d0 * 2").
-    """
-    return inv.set_parameter(name, expression)
-
-
-@tool()
-def add_parameter(name: str, expression: str, units: str = "mm") -> str:
-    """Add a new user parameter.
-
-    Args:
-        name: Parameter name (e.g. "flange_diameter").
-        expression: Value or expression (e.g. "100", "width * 2").
-        units: Units — mm, cm, m, deg, etc.
-    """
-    return inv.add_parameter(name, expression, units)
-
-
 # ---------- Sheet Metal ----------
 
 @tool()
-def set_sheet_metal_thickness(thickness: float = 0.8) -> str:
-    """Override the active sheet metal style's thickness. Use after create_part(template="sheet_metal").
-    If the shop has named rules (see list_sheet_metal_rules), use set_sheet_metal_rule instead —
-    changing only the thickness leaves the rule's bend radius and unfold method unmatched."""
-    return inv.set_sheet_metal_thickness(thickness)
-
-
-@tool()
-def list_sheet_metal_rules() -> str:
-    """List the sheet metal rules available in the active sheet metal part
-    (name, thickness, bend radius, which one is active). Shops often encode
-    their tooling in rule names, e.g. 'T15-V10' = 1.5 mm sheet, V10 die."""
-    return json.dumps(inv.list_sheet_metal_rules(), indent=1, ensure_ascii=False)
-
-
-@tool()
-def set_sheet_metal_rule(name: str) -> str:
-    """Activate a sheet metal rule by name (case-insensitive). Sets thickness,
-    bend radius and unfold method together — prefer this over
-    set_sheet_metal_thickness whenever a matching rule exists.
-    Unknown names return the list of available rules."""
-    return inv.set_sheet_metal_rule(name)
-
-
-@tool()
-def sheet_metal_face(sketch_index: int = 0) -> str:
+def add_sheet_metal_face(sketch_index: int = 0) -> str:
     """Create a base Sheet Metal Face from a closed sketch profile.
     The first flat panel in a sheet metal part. Uses style's Thickness automatically."""
     idx = sketch_index if sketch_index > 0 else None
@@ -1508,7 +1767,7 @@ def sheet_metal_face(sketch_index: int = 0) -> str:
 
 
 @tool()
-def flange(edge_indices: str, distance: float = 25, angle: float = 90,
+def add_flange(edge_indices: str, distance: float = 25, angle: float = 90,
            auto_miter: bool = True, miter_gap: str = "GapSize",
            height_datum: str = "outer") -> str:
     """Add a Sheet Metal Flange (bent wall) to one or more edges.
@@ -1521,7 +1780,7 @@ def flange(edge_indices: str, distance: float = 25, angle: float = 90,
     inward flange on a wall, pick the wall's inner-face edge.
 
     Args:
-        edge_indices: Comma-separated edge indices (use find_edge to locate).
+        edge_indices: Comma-separated edge indices (use find_edges to locate).
         distance: Flange height in mm (default 25 = Inventor default).
         angle: Bend angle in degrees (default 90 = perpendicular).
         auto_miter: Miter the corners between the edges (default True).
@@ -1535,23 +1794,7 @@ def flange(edge_indices: str, distance: float = 25, angle: float = 90,
 
 
 @tool()
-def cut_on_face(face_index: int, circles: str = "", rectangles: str = "") -> str:
-    """Cut holes through the sheet, placed in WORLD coordinates (mm) on a face.
-    Avoids the face-sketch axis confusion — no need to know the sketch's origin.
-    Verifies material was removed (a cut on a work plane silently removes nothing).
-
-    Args:
-        face_index: Face of the sheet to sketch on (use find_face / list_faces).
-        circles: JSON list of [x, y, z, diameter], e.g. "[[180, 267, 0, 4.9]]".
-        rectangles: JSON list of 4-corner lists, e.g. "[[[-150,-300,40],[150,-300,40],[150,-300,160],[-150,-300,160]]]".
-    """
-    c = json.loads(circles) if circles.strip() else []
-    r = json.loads(rectangles) if rectangles.strip() else []
-    return inv.cut_on_face(face_index, c, r)
-
-
-@tool()
-def corner_round(edge_indices: str, radius: float = 5) -> str:
+def add_corner_round(edge_indices: str, radius: float = 5) -> str:
     """Round sharp sheet metal corners (Corner Round — carried into the flat pattern).
     Use on exposed corners people handle, e.g. mounting plate tabs.
 
@@ -1563,133 +1806,14 @@ def corner_round(edge_indices: str, radius: float = 5) -> str:
     return inv.corner_round(idx_list, radius)
 
 
-@tool()
-def sheet_metal_cut(sketch_index: int = 0) -> str:
-    """Cut through the panel — depth = Thickness automatically (parametric!).
-    Sketch must be on the panel face (not a work plane): a cut that removes no
-    material is deleted and reported as an error. For holes at known world
-    coordinates, cut_on_face is easier.
-    One sketch with multiple closed shapes = one Cut feature with multiple holes.
-    """
-    idx = sketch_index if sketch_index > 0 else None
-    return inv.sheet_metal_cut(idx)
-
-
-@tool()
-def find_edge(x: float = 0, y: float = 0, z: float = 0,
-              use_x: bool = False, use_y: bool = False, use_z: bool = False,
-              tolerance: float = 0.1) -> str:
-    """Find an edge by its midpoint coordinates (mm). Returns edge index (string).
-    Useful for flange — locate the edge to bend without printing all edges.
-
-    Args:
-        x/y/z: Target midpoint coordinates (mm).
-        use_x/y/z: Set True for each coord that should be matched (False = ignored).
-        tolerance: How close midpoint must be (mm). Default 0.1.
-    """
-    kwargs = {}
-    if use_x: kwargs['x'] = x
-    if use_y: kwargs['y'] = y
-    if use_z: kwargs['z'] = z
-    idx = inv.find_edge(tolerance=tolerance, **kwargs)
-    return f"Edge {idx}"
-
-
-@tool()
-def find_face(x: float = 0, y: float = 0, z: float = 0,
-              use_x: bool = False, use_y: bool = False, use_z: bool = False,
-              min_area: float = 100, tolerance: float = 0.5) -> str:
-    """Find a planar face by its centroid coordinates (mm). Returns face index (string).
-    Useful for sheet metal Cut — locate the outer panel face to sketch on.
-
-    Args:
-        x/y/z: Target centroid coordinates (mm).
-        use_x/y/z: Set True for each coord that should be matched.
-        min_area: Minimum area in mm² (filters tiny edge faces). Default 100.
-        tolerance: Centroid match tolerance (mm). Default 0.5.
-    """
-    kwargs = {}
-    if use_x: kwargs['x'] = x
-    if use_y: kwargs['y'] = y
-    if use_z: kwargs['z'] = z
-    idx = inv.find_face(min_area=min_area, tolerance=tolerance, **kwargs)
-    return f"Face {idx}"
-
-
 # ---------- Query ----------
 
-@tool()
-def list_features() -> str:
-    """List all features in the active part. Returns JSON list."""
-    features = inv.list_features()
-    return json.dumps(features, indent=2, ensure_ascii=False)
-
-
-@tool()
-def delete_feature(indices: str) -> str:
-    """Delete one or more features by index. Use list_features() to find indices.
-
-    Args:
-        indices: Comma-separated feature indices to delete (e.g. "3,4,5"). Deletes in reverse order automatically.
-    """
-    idx_list = [int(i.strip()) for i in indices.split(",")]
-    return inv.delete_feature(idx_list)
-
-
-@tool()
-def suppress_feature(indices: str, suppressed: bool = True) -> str:
-    """Suppress or unsuppress features (hide without deleting). Use list_features() to find indices.
-
-    Args:
-        indices: Comma-separated feature indices (e.g. "3,4,5").
-        suppressed: True to suppress (hide), False to unsuppress (show).
-    """
-    idx_list = [int(i.strip()) for i in indices.split(",")]
-    return inv.suppress_feature(idx_list, suppressed)
-
-
 # ---------- Assembly (IAM) ----------
-
-@tool()
-def create_assembly(name: str = "", template: str = "metric") -> str:
-    """Create a new empty assembly document (.iam).
-
-    Args:
-        name: Display name for the assembly (optional).
-        template: "metric" (mm, default), "english" (inches), or full path to an .iam file.
-    """
-    return inv.create_assembly(name or None, template)
-
-
-@tool()
-def place_component(
-    path: str,
-    x: float = 0, y: float = 0, z: float = 0,
-    grounded: bool = False,
-    x_axis: str = "", y_axis: str = "",
-) -> str:
-    """Place a part or sub-assembly into the active assembly. The file must exist
-    on disk — save_document() the part first.
-
-    Args:
-        path: Full path to the .ipt / .iam file.
-        x: X position in mm (where the component's origin goes).
-        y: Y position in mm.
-        z: Z position in mm.
-        grounded: Fix the component in space. Ground the FIRST component of every
-                  assembly, otherwise constraints move it instead of the others.
-        x_axis: Optional orientation — where the component's X axis points, e.g. "0,0,1".
-        y_axis: Where its Y axis points, e.g. "0,1,0" (must be perpendicular; Z = X × Y).
-    """
-    xa = tuple(float(v) for v in x_axis.split(",")) if x_axis.strip() else None
-    ya = tuple(float(v) for v in y_axis.split(",")) if y_axis.strip() else None
-    return inv.place_component(path, x, y, z, grounded, x_axis=xa, y_axis=ya)
-
 
 # ---------- Manufacturing outputs ----------
 
 @tool()
-def flat_pattern(path: str = "", format: str = "DXF", bend_lines: bool = True) -> str:
+def export_flat_pattern(path: str = "", format: str = "DXF", bend_lines: bool = True) -> str:
     """Flat pattern of the active sheet metal part: flat size, thickness, bend count — and with
     a path, a DXF/DWG for the laser / punch (layers OUTER = contour, INNER = holes and
     cut-outs, IV_BEND* = bend lines; tangent lines, sketches etc. left out). Creates the
@@ -1704,7 +1828,7 @@ def flat_pattern(path: str = "", format: str = "DXF", bend_lines: bool = True) -
 
 
 @tool()
-def bom(view: str = "parts_only", path: str = "") -> str:
+def export_bom(view: str = "parts_only", path: str = "") -> str:
     """Bill of materials of the active assembly: item, quantity, part number, description,
     material, stock number, mass, file. For purchasing / ERP — set part numbers and
     descriptions first with properties().
@@ -1718,7 +1842,7 @@ def bom(view: str = "parts_only", path: str = "") -> str:
 
 
 @tool()
-def properties(values: dict | None = None, material: str = "", mass_kg: float = 0) -> str:
+def edit_properties(values: dict | None = None, material: str = "", mass_kg: float = 0) -> str:
     """Read — and optionally set — the active document's iProperties: part number,
     description, stock number, vendor, revision, title, cost center, material, mass and
     custom properties. These feed the BOM and the drawing's title block.
@@ -1726,15 +1850,15 @@ def properties(values: dict | None = None, material: str = "", mass_kg: float = 
     Args:
         values: e.g. {"part_number": "BRS-101", "description": "Side panel 2 mm",
                 "stock_number": "DKP-2.0"}. Unknown keys become custom properties.
-        material: Material name as in Inventor's library (e.g. "Steel, Mild"; list_materials).
+        material: Material name as in Inventor's library (e.g. "Steel, Mild"; manage_materials(action='list')).
         mass_kg: Override the mass — for vendor models made of surfaces, which have no volume
-                 (a 1.23 kg motor showed 0.23 kg). material_report lists them.
+                 (a 1.23 kg motor showed 0.23 kg). manage_materials lists them.
     """
     return json.dumps(inv.properties(values, material, mass_kg), indent=1, ensure_ascii=False, default=str)
 
 
 @tool()
-def surface_to_solid(work_surfaces: str = "all", tolerance: float = 0.01, patch_holes: bool = True) -> str:
+def convert_surfaces_to_solid(work_surfaces: str = "all", tolerance: float = 0.01, patch_holes: bool = True) -> str:
     """Turn surfaces into solids — imported vendor models (x_t, IGES, STEP) that came in as
     faces with no volume, so no mass and no booleans. Stitches the part's visible surfaces,
     patches the holes left in the shell, and closes it into a solid; a shell that is already
@@ -1751,42 +1875,7 @@ def surface_to_solid(work_surfaces: str = "all", tolerance: float = 0.01, patch_
 
 
 @tool()
-def list_materials(search: str = "") -> str:
-    """Material names in Inventor's libraries, e.g. search="steel" or "alum" — the exact
-    names set_material / properties / create_part take."""
-    names = inv.list_materials(search)
-    return f"{len(names)} material(s): " + ", ".join(names[:150]) + (" …" if len(names) > 150 else "")
-
-
-@tool()
-def material_report(path: str = "", only_problems: bool = False) -> str:
-    """Material and mass of every part of the active assembly (or part; below `path` for a
-    sub-assembly): counts per material, total mass, and what needs a look — parts left on
-    Generic, vendor models made of surfaces (no volume, mass too low), parts with no mass.
-
-    Args:
-        path: Sub-assembly path to limit it to (list_occurrences(depth=2)).
-        only_problems: Just the summary and the problems, no per-part rows.
-    """
-    return json.dumps(inv.material_report(path, only_problems), indent=1, ensure_ascii=False)
-
-
-@tool()
-def set_material(material: str, parts: str = "*", only_generic: bool = False, path: str = "") -> str:
-    """Give many parts a material at once — every part of the active assembly whose name
-    matches. Content Center and library parts are left alone. Save afterwards.
-
-    Args:
-        material: From the library (list_materials), e.g. "Steel, Mild".
-        parts: Name patterns, ","-separated, e.g. "*PLATE*,*BRACKET*" ("*" = all parts).
-        only_generic: Only parts still on Generic / Default.
-        path: Limit to a sub-assembly (list_occurrences(depth=2)).
-    """
-    return inv.set_material(material, parts, only_generic, path)
-
-
-@tool()
-def make_drawing(pdf_path: str, views: str = "front,top,right,iso", template: str = "ISO",
+def create_drawing(pdf_path: str, views: str = "front,top,right,iso", template: str = "ISO",
                  scale: float = 0, flat: bool = False, drawing_path: str = "") -> str:
     """2D drawing of the active part or assembly (saved to disk) → PDF for the shop floor.
     A base view, projected views around it, overall dimensions on the base view (between
@@ -1807,9 +1896,9 @@ def make_drawing(pdf_path: str, views: str = "front,top,right,iso", template: st
 
 
 @tool()
-def content_center(category: str = "", family: str = "", size: str = "",
+def use_content_center(category: str = "", family: str = "", size: str = "",
                    length: float = 0, file_name: str = "") -> str:
-    """Browse the Content Center and make member parts to place (place_component / place_many).
+    """Browse the Content Center and make member parts to place (place_components / place_components).
 
     Step by step — each call is quick (the whole tree takes minutes to walk, so give a path):
       content_center()                                         → top categories
@@ -1831,12 +1920,12 @@ def content_center(category: str = "", family: str = "", size: str = "",
 
 
 @tool()
-def frame_members(members: list[dict], category: str = "", family: str = "", size: str = "",
+def add_frame_members(members: list[dict], category: str = "", family: str = "", size: str = "",
                   folder: str = "") -> str:
     """Build a steel frame: structural profiles laid along skeleton lines in the active
     assembly — what Frame Generator does (it has no API). Each member is a Content Center
     custom-length part (one file per profile and length, reused), turned so its length runs
-    from start to end. Returns the placements and a saw cut list. Check with view_image.
+    from start to end. Returns the placements and a saw cut list. Check with capture_view.
 
     Args:
         members: [{"start": [0,0,0], "end": [0,0,2000], "name": "Post_1"}, ...] in mm. Per
@@ -1845,26 +1934,11 @@ def frame_members(members: list[dict], category: str = "", family: str = "", siz
             middle on the line, default; "origin" = the profile's own origin), "extend"
             ([at start, at end] mm, negative to shorten — e.g. to stop at a crossing member).
             Horizontal members keep their section level; roll 90 turns a U to face sideways.
-        category, family, size: Default profile, as content_center lists them, e.g.
+        category, family, size: Default profile, as use_content_center lists them, e.g.
             "Structural Shapes/Channels", "DIN 1026-1", "U 100".
         folder: Where the member files go (default: project workspace /Content Center Custom).
     """
     return inv.frame_members(members, folder, category, family, size)
-
-
-@tool()
-def place_many(components: list[dict]) -> str:
-    """Place many parts / sub-assemblies into the active assembly in one call — for frames
-    of dozens or hundreds of members, where place_component one by one is slow.
-
-    Args:
-        components: [{"path": "C:/.../beam.ipt", "x": 0, "y": 0, "z": 0,
-                      "x_axis": [1,0,0], "y_axis": [0,1,0], "grounded": false,
-                      "name": "Beam_A1"}, ...]. mm. "origin": [x,y,z] works too. Axes and
-                      name are optional (axes: where the part's own X/Y point; give both).
-                      Files must exist — all are checked before anything is placed.
-    """
-    return inv.place_many(components)
 
 
 @tool()
@@ -1873,7 +1947,7 @@ def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
     The STEP is copied into dest_folder first, because Inventor writes the parts of
     an imported assembly next to the .step file (e.g. into Downloads or a synced folder).
     Returns path, type, overall bbox and per-component bbox/volume — use them to
-    find mounting faces and axes before placing it with place_component.
+    find mounting faces and axes before placing it with place_components.
 
     Args:
         step_path: The downloaded .step / .stp file.
@@ -1884,26 +1958,29 @@ def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
 
 
 @tool()
-def check_interference(set_a: str, set_b: str = "") -> str:
-    """Check overlap between occurrences of the active assembly. Touching faces
-    are not reported. Intended overlaps (gasket compression) show up too — read
-    the volume and bbox.
+def check_interference(set_a: str, set_b: str = "", ignore_fasteners: bool = False) -> str:
+    """Check overlap between occurrences of the active assembly: full paths of both, volume and
+    bounding box of each. Touching faces are not reported. Intended overlaps (gasket compression,
+    thread in thread) show up too — read the volume and bbox.
 
     Args:
-        set_a: Comma-separated occurrence names, e.g. "PANO_KAPAK:1". Use "Asm:1/2"
-            for one part inside a sub-assembly (e.g. a vendor hinge's body).
-        set_b: Names to test against; empty = everything else.
+        set_a: Comma-separated names, paths or patterns: "DOOR:1", "Sub:1/Part:2", "*BRACKET*".
+        set_b: The same, to test against; empty = everything else.
+        ignore_fasteners: Set aside overlaps with small Content Center members (bolts, nuts,
+                          washers, under 150 mm) — threads overlap by design. They are counted.
     """
     a = [s.strip() for s in set_a.split(",") if s.strip()]
     b = [s.strip() for s in set_b.split(",") if s.strip()] or None
-    hits = inv.check_interference(a, b)
-    return json.dumps(hits, indent=1, ensure_ascii=False) if hits else "No interference"
+    hits = inv.check_interference(a, b, ignore_fasteners)
+    shown = [h for h in hits if not h.get("fastener")]
+    note = f"\n({len(hits) - len(shown)} overlap(s) with fasteners set aside)" if len(hits) != len(shown) else ""
+    return (json.dumps(shown, indent=1, ensure_ascii=False) if shown else "No interference") + note
 
 
 @tool()
 def measure_distance(a: str, b: str) -> str:
     """Minimum distance in mm between two occurrences (0 = touching/overlapping).
-    Names as in list_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
+    Names as in manage_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
     return f"{inv.measure_distance(a, b)} mm"
 
 
@@ -1929,156 +2006,6 @@ def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
     ax = tuple(float(v) for v in axis_dir.split(","))
     rows = inv.sweep_rotation(mv, pt, ax, start, stop, step, ag, measure_to or None)
     return json.dumps(rows, indent=1, ensure_ascii=False)
-
-
-@tool()
-def list_occurrences(depth: int = 1) -> str:
-    """Compact table of the assembly's components:
-    '[1] block:1  pos=(0.0,0.0,0.0) grounded'. Indices feed the constrain tools.
-
-    Args:
-        depth: 2+ also lists the components inside sub-assemblies, with their paths
-               ("Frame:1/Post:2") for assembly_faces / constrain_faces / check_interference.
-    """
-    return inv.list_occurrences(depth)
-
-
-@tool()
-def assembly_faces(path: str, surface: str = "", normal: list[float] | None = None,
-                   at: dict | None = None, diameter: float = 0, min_area: float = 0,
-                   max_count: int = 30) -> str:
-    """Find faces of a component anywhere in the assembly — also inside sub-assemblies —
-    in TOP assembly coordinates (mm). Each result has a ref ("Sub:1/Part:1#F12") that
-    constrain_faces takes. For a sub-assembly path, every part below it is searched.
-
-    Args:
-        path: Component path from list_occurrences(depth=2), e.g. "Z AXIS:1/FIXED PLATE:1".
-        surface: "plane", "cylinder", "cone", … (empty = any).
-        normal: Outward normal of a plane, e.g. [0, 0, 1] for faces looking up.
-        at: Face center coordinates to match, e.g. {"Z": 182.5}.
-        diameter: Cylinder diameter in mm.
-        min_area: Skip faces smaller than this (mm²).
-        max_count: Most results to return.
-    """
-    return json.dumps(inv.assembly_faces(path, surface, normal, at, diameter, min_area, max_count),
-                      indent=1, ensure_ascii=False)
-
-
-@tool()
-def constrain_faces(a: str, b: str, kind: str = "mate", offset: float = 0, angle: float = 0,
-                    a_at: dict | None = None) -> str:
-    """Constrain two components by faces (refs from assembly_faces) or origin geometry
-    ("Sub:1/Part:1#XY", "#X", "#ORIGIN") — anywhere in the assembly, sub-assemblies too.
-    The constraint goes into the active (top) assembly.
-
-    Says which OTHER components the constraint moved — a constraint can drag parts through
-    others you didn't mean to touch.
-
-    Args:
-        a, b: Refs. a is the one meant to move.
-        kind: "mate" (faces against each other / axes in line), "flush" (faces the same
-              way, side by side) or "angle".
-        offset: mm for mate / flush. Its sign is easy to get wrong — give a_at too.
-        angle: Degrees for kind="angle".
-        a_at: Where a's face must end up, e.g. {"Z": 182.5}. If it lands elsewhere, the
-              offset is tried with the other sign.
-    """
-    return inv.constrain_faces(a, b, kind, offset, angle, a_at)
-
-
-@tool()
-def assembly_info() -> str:
-    """Snapshot of the active assembly: components with positions, constraint
-    count, mass and volume. One call instead of several queries."""
-    return json.dumps(inv.assembly_info(), indent=1, ensure_ascii=False)
-
-
-@tool()
-def constrain(
-    occurrence1: int, geometry1: str,
-    occurrence2: int, geometry2: str,
-    kind: str = "mate",
-    offset: float = 0,
-    angle: float = 0,
-) -> str:
-    """Constrain two components by their ORIGIN geometry — the parametric way to
-    assemble. Origin constraints survive part edits; face picks break when
-    topology renumbers.
-
-    Args:
-        occurrence1: Index of the first component (see list_occurrences).
-        geometry1: "XY", "XZ", "YZ", "X", "Y", "Z" or "ORIGIN".
-        occurrence2: Index of the second component.
-        geometry2: Same options as geometry1.
-        kind: "mate" (planes face each other / axes collinear), "flush" (planes
-              point the same way) or "angle".
-        offset: Offset in mm for mate/flush.
-        angle: Angle in degrees for kind="angle".
-    """
-    return inv.constrain(occurrence1, geometry1, occurrence2, geometry2, kind, offset, angle)
-
-
-@tool()
-def constrain_insert(
-    occurrence1: int, edge1: int,
-    occurrence2: int, edge2: int,
-    offset: float = 0,
-    axes_opposed: bool = True,
-) -> str:
-    """Insert constraint between two circular edges — a bolt into a hole in one
-    call (aligns the axes AND seats the faces).
-
-    Args:
-        occurrence1: Index of the first component.
-        edge1: Circular edge index on that component (see list_component_edges).
-        occurrence2: Index of the second component.
-        edge2: Circular edge index on that component.
-        offset: Distance between the two circle planes in mm.
-        axes_opposed: True = the components face each other (normal bolt/hole case).
-    """
-    return inv.constrain_insert(occurrence1, edge1, occurrence2, edge2, offset, axes_opposed)
-
-
-@tool()
-def list_component_edges(occurrence: int, circular_only: bool = True, max_count: int = 40) -> str:
-    """Edge table of one placed component in its own part coordinates:
-    '[1] circle D=10.0 c=(0.0,0.0,10.0)'. Use to pick edges for constrain_insert.
-
-    Args:
-        occurrence: Component index (see list_occurrences).
-        circular_only: Only list circular edges (the ones Insert can use).
-        max_count: Maximum rows to return.
-    """
-    return inv.list_component_edges(occurrence, circular_only, max_count)
-
-
-@tool()
-def list_constraints() -> str:
-    """List the assembly constraints with their indices."""
-    return inv.list_constraints()
-
-
-@tool()
-def delete_constraint(index: int) -> str:
-    """Delete an assembly constraint by index (see list_constraints)."""
-    return inv.delete_constraint(index)
-
-
-@tool()
-def ground_occurrence(index: int, grounded: bool = True) -> str:
-    """Ground (fix in space) or unground a component.
-
-    Args:
-        index: Component index (see list_occurrences).
-        grounded: True to ground, False to release.
-    """
-    return inv.ground_occurrence(index, grounded)
-
-
-@tool()
-def delete_occurrence(index: int) -> str:
-    """Remove a component from the assembly (see list_occurrences for the index)."""
-    return inv.delete_occurrence(index)
 
 
 def main():

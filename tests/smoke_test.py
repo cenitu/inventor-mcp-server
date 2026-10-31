@@ -240,7 +240,7 @@ def document_tests(inv, run):
         return "dependent dirty" if part.Dirty else _raise("part did not become dirty")
     run.step("modify the referenced part (dirty dependent)", make_dependent_dirty)
     # Before the fix this opened Inventor's modal 'save dependents?' dialog and blocked.
-    run.step("save_document saves dependents without a dialog", lambda: inv.save_document())
+    run.step("save_document saves dependents without a dialog", lambda: inv.save_document(save_dependents=True))
     run.step("dependent is saved",
              lambda: "ok" if not any(d.Dirty for d in inv.active_document().AllReferencedDocuments)
              else _raise("a dependent is still unsaved"))
@@ -424,6 +424,8 @@ def main():
         print(f"Cannot connect to Inventor: {e}")
         return 1
     print("  version:", inv.app.SoftwareVersion.DisplayVersion)
+    if own:  # nobody sits at this Inventor: it answers its own prompts, as under the server
+        inv.app.SilentOperation = True
     try:
         return run_all(inv, run, keep)
     finally:

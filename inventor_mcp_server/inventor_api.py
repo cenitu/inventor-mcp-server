@@ -649,7 +649,19 @@ class InventorConnection:
         return folders
 
     @staticmethod
-    def _library_reason(doc, folders, members: bool = True) -> str:
+    def protected_patterns() -> list[str]:
+        """Extra protected paths (globs): INVENTOR_MCP_PROTECTED, ";"-separated, and
+        ~/.inventor-mcp/protected.txt, one per line — vendor originals, other projects."""
+        pats = [p for p in os.environ.get("INVENTOR_MCP_PROTECTED", "").split(";") if p.strip()]
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".inventor-mcp", "protected.txt"), encoding="utf-8") as f:
+                pats += [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        except OSError:
+            pass
+        return [os.path.normcase(os.path.expandvars(p.strip())) for p in pats]
+
+    @classmethod
+    def _library_reason(cls, doc, folders, members: bool = True) -> str:
         """Why doc must not be saved ('' if it may be): a file in a library / Content Center
         folder, or (members=True) any Content Center member — custom-length ones included,
         which only Content Center itself should rewrite."""
@@ -659,14 +671,23 @@ class InventorConnection:
                     return "Content Center member"
             except Exception:
                 pass
-        name = os.path.normcase(os.path.abspath(doc.FullFileName)) if doc.FullFileName else ""
+        return cls._path_reason(doc.FullFileName, folders) if doc.FullFileName else ""
+
+    @classmethod
+    def _path_reason(cls, path: str, folders) -> str:
+        """Why nothing may be written to path ('' if it may be)."""
+        import fnmatch
+        name = os.path.normcase(os.path.abspath(path))
         for f in folders:
-            if name and (name == f or name.startswith(f.rstrip("\\/") + os.sep)):
+            if name == f or name.startswith(f.rstrip("\\/") + os.sep):
                 return "library / Content Center folder"
+        if any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(name, p.rstrip("\\/") + os.sep + "*")
+               for p in cls.protected_patterns()):
+            return "protected path"
         return ""
 
     def save_document(self, path: str | None = None, overwrite: bool = False,
-                      save_dependents: bool = True) -> str:
+                      save_dependents: bool = False) -> str:
         """Save the active document without any dialog — and never a library or Content
         Center file.
 
@@ -689,9 +710,9 @@ class InventorConnection:
                                "really changed it.")
         target = os.path.abspath(path) if path else None
         if target:
-            name = os.path.normcase(target)
-            if any(name.startswith(f.rstrip("\\/") + os.sep) for f in folders):
-                raise RuntimeError(f"{target} is in a library / Content Center folder — save it elsewhere")
+            why = self._path_reason(target, folders)
+            if why:
+                raise RuntimeError(f"{target} is in a {why} — save it elsewhere")
             if self._check_save_path(doc, target, overwrite):
                 target = None  # its own file: save in place
         saved, skipped, failed = [], [], []
@@ -708,14 +729,23 @@ class InventorConnection:
                     saved.append(d.FullFileName)
                 except Exception as e:
                     failed.append(f"{d.DisplayName}: {describe_com_error(e)}")
-        if target:
-            self._silently(lambda: doc.SaveAs(target, False))
-            saved.insert(0, target)
-            msg = f"Saved as: {target}"
-        else:
-            self._silently(lambda: doc.Save2(False))
-            saved.insert(0, doc.FullFileName)
-            msg = f"Saved: {doc.FullFileName}"
+        # SaveAs under SilentOperation writes every dirty dependent too — protected files
+        # included. So what must not be written is marked clean for the moment of the save.
+        held = [d for d in doc.AllReferencedDocuments if d.Dirty]
+        for d in held:
+            d.Dirty = False
+        try:
+            if target:
+                self._silently(lambda: doc.SaveAs(target, False))
+                saved.insert(0, target)
+                msg = f"Saved as: {target}"
+            else:
+                self._silently(lambda: doc.Save2(False))
+                saved.insert(0, doc.FullFileName)
+                msg = f"Saved: {doc.FullFileName}"
+        finally:
+            for d in held:
+                d.Dirty = True
         if len(saved) > 1:
             msg += f"\nDependents saved ({len(saved) - 1}): " + ", ".join(saved[1:])
         if skipped:
@@ -752,11 +782,16 @@ class InventorConnection:
     def list_documents(self) -> list[dict]:
         """Open (visible) documents, the active one marked."""
         active = self.app.ActiveDocument
+        folders = self.library_folders()
         out = []
         for d in self.app.Documents.VisibleDocuments:
-            out.append({"name": d.DisplayName, "path": d.FullFileName or "(unsaved)",
-                        "type": {12290: "part", 12291: "assembly", 12292: "drawing"}.get(d.DocumentType, str(d.DocumentType)),
-                        "dirty": bool(d.Dirty), "active": active is not None and d.InternalName == active.InternalName})
+            row = {"name": d.DisplayName, "path": d.FullFileName or "(unsaved)",
+                   "type": {12290: "part", 12291: "assembly", 12292: "drawing"}.get(d.DocumentType, str(d.DocumentType)),
+                   "dirty": bool(d.Dirty), "active": active is not None and d.InternalName == active.InternalName}
+            why = self._library_reason(d, folders)
+            if why:
+                row["protected"] = why
+            out.append(row)
         return out
 
     def activate_document(self, name_or_path: str) -> str:
@@ -2501,22 +2536,44 @@ class InventorConnection:
             matrix.SetTranslation(tg.CreateVector(x / 10.0, y / 10.0, z / 10.0))
         return matrix
 
-    def place_many(self, items: list[dict]) -> str:
+    def _existing_placements(self, comp) -> set:
+        keys = set()
+        for i in range(1, comp.Occurrences.Count + 1):
+            o = comp.Occurrences.Item(i)
+            try:
+                keys.add(self._placement_key(o.Definition.Document.FullFileName, o.Transformation))
+            except Exception:
+                pass
+        return keys
+
+    @staticmethod
+    def _placement_key(path, m) -> tuple:
+        return (os.path.normcase(os.path.abspath(path)),
+                *(round(m.Cell(r, c) * (10 if c == 4 else 1), 2) for r in (1, 2, 3) for c in (1, 2, 3, 4)))
+
+    def place_many(self, items: list[dict], atomic: bool = True, skip_if_exists: bool = False) -> str:
         """Place many components in one call: [{path, x, y, z, x_axis, y_axis, grounded, name}].
-        x/y/z (or origin=[x,y,z]) in mm. Every entry is checked before anything is placed;
-        a placement that fails is reported and the rest go on."""
+        x/y/z (or origin=[x,y,z]) in mm. Every entry is checked before anything is placed.
+        atomic: one undo step — if a placement fails, none stay, so running the list again
+        doesn't double what was placed. skip_if_exists: leave out what already sits there."""
         comp = self.active_assembly()
         missing = sorted({os.path.abspath(it["path"]) for it in items
                           if not os.path.exists(os.path.abspath(it.get("path", "")))})
         if missing:
             raise RuntimeError("Files not found (nothing placed): " + ", ".join(missing))
-        placed, failed = [], []
+        placed, failed, skipped = [], [], 0
+        have = self._existing_placements(comp) if skip_if_exists else set()
+        txn = None
+        if atomic:
+            txn = self.app.TransactionManager.StartTransaction(self.active_document(), "MCP place_components")
         for n, it in enumerate(items, 1):
             try:
                 x, y, z = it.get("origin") or (it.get("x", 0), it.get("y", 0), it.get("z", 0))
-                occ = comp.Occurrences.Add(os.path.abspath(it["path"]),
-                                           self._placement(float(x), float(y), float(z),
-                                                           it.get("x_axis"), it.get("y_axis")))
+                where = self._placement(float(x), float(y), float(z), it.get("x_axis"), it.get("y_axis"))
+                if skip_if_exists and self._placement_key(it["path"], where) in have:
+                    skipped += 1
+                    continue
+                occ = comp.Occurrences.Add(os.path.abspath(it["path"]), where)
                 if it.get("grounded"):
                     occ.Grounded = True
                 if it.get("name"):
@@ -2527,7 +2584,14 @@ class InventorConnection:
                 placed.append(occ.Name)
             except Exception as e:
                 failed.append(f"#{n} {os.path.basename(it['path'])}: {e}")
+                if txn is not None:
+                    txn.Abort()
+                    raise RuntimeError(f"Nothing placed (atomic) — {failed[-1]}") from None
+        if txn is not None:
+            txn.End()
         msg = f"Placed {len(placed)} of {len(items)} ({comp.Occurrences.Count} occurrences now)"
+        if skipped:
+            msg += f", {skipped} already there"
         if len(placed) <= 12:
             msg += f": {', '.join(placed)}"
         return msg + ("\nProblems:\n  " + "\n  ".join(failed) if failed else "")
@@ -2592,10 +2656,11 @@ class InventorConnection:
 
     def view_images(self, views=("iso",), width: int = 800, height: int = 600,
                     white: bool = False, focus: str = "", sketches: bool = False,
-                    up: str = "y") -> list[str]:
+                    up: str = "y", isolate: str = "") -> list[str]:
         """Render the active document from each named view into PNG files and return their
         paths. The camera is put back afterwards, so the user's view doesn't jump.
-        focus: an occurrence name — zoom to that component instead of the whole model."""
+        focus: occurrence paths, ","-separated — zoom to them instead of the whole model.
+        isolate: occurrence paths — hide every other part while capturing."""
         import tempfile
         unknown = [v for v in views if v not in self.VIEWS]
         if unknown:
@@ -2605,6 +2670,7 @@ class InventorConnection:
         cam = view.Camera
         saved = (cam.Eye, cam.Target, cam.UpVector, cam.Perspective)
         box = self._occurrence_box(focus) if focus else None
+        hidden = self._isolate(isolate) if isolate else []
         colors = ()
         if white:
             colors = (self.app.TransientObjects.CreateColor(255, 255, 255),) * 2  # top, bottom
@@ -2631,10 +2697,16 @@ class InventorConnection:
                     cam.Apply()
                 if box is not None:
                     self._zoom_to(cam, box)
+                view.Update()  # the camera change has to be drawn before the picture is taken
                 path = os.path.join(folder, f"{name}.png")
                 cam.SaveAsBitmap(path, int(width), int(height), *colors)
                 paths.append(path)
         finally:
+            for o in hidden:
+                try:
+                    o.Visible = True
+                except Exception:
+                    pass
             cam.Eye, cam.Target, cam.UpVector = saved[0], saved[1], saved[2]
             cam.Perspective = saved[3]
             cam.Apply()
@@ -2645,13 +2717,29 @@ class InventorConnection:
                     pass
         return paths
 
-    def _occurrence_box(self, name: str):
-        comp = self.active_assembly()
-        occ = next((comp.Occurrences.Item(i) for i in range(1, comp.Occurrences.Count + 1)
-                    if comp.Occurrences.Item(i).Name.lower() == name.lower()), None)
-        if occ is None:
-            raise RuntimeError(f"No component named {name!r} (see list_occurrences)")
-        return occ.RangeBox
+    def _occurrence_box(self, names: str):
+        """Range box around the named occurrences (top assembly coordinates)."""
+        boxes = [self._occ(n.strip()).RangeBox for n in names.split(",") if n.strip()]
+        box = boxes[0].Copy()
+        for b in boxes[1:]:
+            box.Extend(b.MinPoint)
+            box.Extend(b.MaxPoint)
+        return box
+
+    def _isolate(self, names: str) -> list:
+        """Hide every part outside the named occurrences; returns what to show again."""
+        keep = [n.strip() for n in names.split(",") if n.strip()]
+        for n in keep:
+            self._occ(n)  # a wrong name fails here, before anything is hidden
+        hidden = []
+        leaves = self.active_assembly().Occurrences.AllLeafOccurrences
+        for i in range(1, leaves.Count + 1):
+            o = leaves.Item(i)
+            path = self._path_of(o)
+            if o.Visible and not any(path == k or path.startswith(k + "/") for k in keep):
+                o.Visible = False
+                hidden.append(o)
+        return hidden
 
     @staticmethod
     def _zoom_to(cam, box):
@@ -3387,7 +3475,12 @@ class InventorConnection:
         norm = lambda s: str(s).replace(" ", "").lower()
         row = next((r for r in rows if any(norm(r.GetCellValue(cols[c])) == norm(size) for c in names)), None)
         if row is None:
-            raise RuntimeError(f"No size {size!r} in {fam.DisplayName}. Sizes: {', '.join(label(r) for r in rows)}")
+            import difflib
+            all_sizes = [label(r) for r in rows]
+            close = difflib.get_close_matches(size, all_sizes, n=6, cutoff=0.3)
+            raise RuntimeError(f"No size {size!r} in {fam.DisplayName}."
+                               + (f" Closest: {', '.join(close)}." if close else "")
+                               + f" {len(all_sizes)} sizes: {', '.join(all_sizes[:60])}")
         custom = length > 0
         if custom and "B_L" not in cols:
             raise RuntimeError(f"{fam.DisplayName} has no length parameter (B_L) — omit length.")
@@ -3569,6 +3662,9 @@ class InventorConnection:
         """Occurrence by name in the active assembly; 'Sub:1/2' reaches a
         sub-occurrence (e.g. one part of a vendor hinge assembly)."""
         comp = self.active_assembly()
+        name = str(name)
+        if name.isdigit():
+            return comp.Occurrences.Item(int(name))
         parts = name.split("/")
         coll = comp.Occurrences
         occ = None
@@ -3580,14 +3676,44 @@ class InventorConnection:
             occ = matches[0]
         return occ
 
-    def check_interference(self, set_a: list[str], set_b: list[str] | None = None) -> list[dict]:
+    def _occ_set(self, names: list[str]) -> list:
+        """Occurrences for names, paths or patterns (* ?) on the full path of every part."""
+        import fnmatch
+        out, leaves = [], None
+        for n in names:
+            if not any(c in n for c in "*?"):
+                out.append(self._occ(n))
+                continue
+            if leaves is None:
+                ls = self.active_assembly().Occurrences.AllLeafOccurrences
+                leaves = [(self._path_of(ls.Item(i)), ls.Item(i)) for i in range(1, ls.Count + 1)]
+            hits = [o for p, o in leaves if fnmatch.fnmatch(p.lower(), n.lower())]
+            if not hits:
+                raise ValueError(f"No component matches {n!r}")
+            out += hits
+        return out
+
+    @staticmethod
+    def _is_fastener(occ) -> bool:
+        """A small Content Center member — bolt, nut, washer, rivet."""
+        try:
+            if not occ.Definition.IsContentMember:
+                return False
+            rb = occ.RangeBox
+            return max(rb.MaxPoint.X - rb.MinPoint.X, rb.MaxPoint.Y - rb.MinPoint.Y,
+                       rb.MaxPoint.Z - rb.MinPoint.Z) * 10 < 150
+        except Exception:
+            return False
+
+    def check_interference(self, set_a: list[str], set_b: list[str] | None = None,
+                           ignore_fasteners: bool = False) -> list[dict]:
         """Interference between two sets of occurrences (names; 'Asm:1/2' for a
         sub-part). set_b empty = everything else. Returns overlap volume and
         bounding box per pair — touching faces are not interference."""
         comp = self.active_assembly()
-        a = [self._occ(n) for n in set_a]
+        a = self._occ_set(set_a)
         a_names = {o.Name for o in a}
-        b = [self._occ(n) for n in set_b] if set_b else [o for o in comp.Occurrences if o.Name not in a_names]
+        b = self._occ_set(set_b) if set_b else [o for o in comp.Occurrences if o.Name not in a_names]
         ca = self.app.TransientObjects.CreateObjectCollection()
         for o in a:
             ca.Add(o)
@@ -3599,10 +3725,13 @@ class InventorConnection:
         for i in range(1, res.Count + 1):
             r = res.Item(i)
             rb = r.InterferenceBody.RangeBox
-            out.append({"a": r.OccurrenceOne.Name, "b": r.OccurrenceTwo.Name,
-                        "volume_mm3": round(r.Volume * 1000, 3),
-                        "bbox_mm": [round(v * 10, 2) for v in (rb.MinPoint.X, rb.MaxPoint.X, rb.MinPoint.Y,
-                                                                rb.MaxPoint.Y, rb.MinPoint.Z, rb.MaxPoint.Z)]})
+            hit = {"a": self._path_of(r.OccurrenceOne), "b": self._path_of(r.OccurrenceTwo),
+                   "volume_mm3": round(r.Volume * 1000, 3),
+                   "bbox_mm": [round(v * 10, 2) for v in (rb.MinPoint.X, rb.MaxPoint.X, rb.MinPoint.Y,
+                                                           rb.MaxPoint.Y, rb.MinPoint.Z, rb.MaxPoint.Z)]}
+            if ignore_fasteners and (self._is_fastener(r.OccurrenceOne) or self._is_fastener(r.OccurrenceTwo)):
+                hit["fastener"] = True
+            out.append(hit)
         return out
 
     def measure_distance(self, a: str, b: str) -> float:
@@ -3691,20 +3820,272 @@ class InventorConnection:
             row(occ, f"[{i}]", 0, occ.Name)
         return "\n".join(lines) if lines else "(no components placed)"
 
-    def ground_occurrence(self, index: int, grounded: bool = True) -> str:
+    def ground_occurrence(self, index, grounded: bool = True) -> str:
         """Ground (fix in space) or unground a component. Ground the first
         component of every assembly — otherwise constraints move it instead."""
-        comp = self.active_assembly()
-        occ = comp.Occurrences.Item(index)
+        occ = self._occ(index)
         occ.Grounded = grounded
         return f"{'Grounded' if grounded else 'Ungrounded'}: {occ.Name}"
 
-    def delete_occurrence(self, index: int) -> str:
+    # ---------- 1.0: one tool per job ----------
+
+    def find_faces(self, path="", surface="", normal=None, at=None, diameter=0.0, min_area=0.0,
+                   max_count=30) -> list[dict]:
+        """Faces of a component (path) or of the active part's bodies, filtered."""
+        if path:
+            return self.assembly_faces(path, surface, normal, at, diameter, min_area, max_count)
+        comp = self.active_part()
+        rows = []
+        bodies = comp.SurfaceBodies
+        for bi in range(1, bodies.Count + 1):
+            faces = bodies.Item(bi).Faces
+            for fi in range(1, faces.Count + 1):
+                info = self._face_info(faces.Item(fi))
+                if self._face_matches(info, surface, normal, at, diameter, min_area, 0.05):
+                    info["index"] = fi
+                    if bi > 1:
+                        info["body"] = bi
+                    rows.append(info)
+                    if len(rows) >= max_count:
+                        return rows
+        return rows
+
+    def _edge_info(self, e) -> dict:
+        """Type, length, midpoint (or circle center, diameter) of an edge, in mm."""
+        kind = e.GeometryType
+        if kind == kCircleCurve:
+            g = e.Geometry
+            c = g.Center
+            return {"type": "circle", "diameter": round(g.Radius * 20, 3),
+                    "at": [round(c.X * 10, 3), round(c.Y * 10, 3), round(c.Z * 10, 3)]}
+        a, b = e.StartVertex.Point, e.StopVertex.Point
+        return {"type": {5123: "line", 5125: "arc"}.get(kind, "curve"),
+                "length": round(sum((p - q) ** 2 for p, q in ((a.X, b.X), (a.Y, b.Y), (a.Z, b.Z))) ** 0.5 * 10, 3),
+                "at": [round((a.X + b.X) * 5, 3), round((a.Y + b.Y) * 5, 3), round((a.Z + b.Z) * 5, 3)]}
+
+    def find_edges(self, path="", at=None, circular=False, diameter=0.0, min_length=0.0,
+                   max_count=40, tolerance=0.1) -> list[dict]:
+        """Edges of a component (path) or the active part, filtered by midpoint / circle center."""
+        def wanted(info):
+            if circular and info["type"] != "circle":
+                return False
+            if diameter and abs(info.get("diameter", -1) - diameter) > tolerance:
+                return False
+            if min_length and info.get("length", 1e9) < min_length:
+                return False
+            return not at or all(abs(info["at"]["XYZ".index(k.upper())] - float(v)) <= tolerance
+                                 for k, v in at.items())
+
+        rows = []
+        sources = [(p, o.SurfaceBodies) for p, o in self._leaves(self._occ(path), path)] if path \
+            else [("", self.active_part().SurfaceBodies)]
+        for prefix, bodies in sources:
+            for bi in range(1, bodies.Count + 1):
+                edges = bodies.Item(bi).Edges
+                for ei in range(1, edges.Count + 1):
+                    info = self._edge_info(edges.Item(ei))
+                    if wanted(info):
+                        if prefix:
+                            info["ref"] = f"{prefix}#{'B%d' % bi if bi > 1 else ''}E{ei}"
+                        else:
+                            info["index"] = ei
+                        rows.append(info)
+                        if len(rows) >= max_count:
+                            return rows
+        return rows
+
+    def inspect_model(self) -> dict:
+        doc = self.active_document()
+        return self.assembly_info() if doc.DocumentType == kAssemblyDocumentObject else self.inspect()
+
+    def find_occurrences(self, definition="", axis=None, near=None, within=0.0) -> list[dict]:
+        """Part occurrences by definition name pattern, Z axis direction (either way) and
+        distance from a point (mm)."""
+        import fnmatch, math
         comp = self.active_assembly()
-        occ = comp.Occurrences.Item(index)
-        name = occ.Name
-        occ.Delete()
-        return f"Deleted occurrence: {name} ({comp.Occurrences.Count} left)"
+        pat = definition.lower()
+        want = None
+        if axis is not None:
+            n = math.sqrt(sum(float(c) ** 2 for c in axis))
+            want = [float(c) / n for c in axis]
+        rows = []
+        leaves = comp.Occurrences.AllLeafOccurrences
+        for i in range(1, leaves.Count + 1):
+            o = leaves.Item(i)
+            if pat:
+                d = o.Definition.Document
+                names = (d.DisplayName.lower(), os.path.basename(d.FullFileName).lower(), o.Name.lower())
+                if not any(fnmatch.fnmatch(n, pat) for n in names):
+                    continue
+            m = o.Transformation
+            z = [m.Cell(r, 3) for r in (1, 2, 3)]
+            pos = [m.Cell(r, 4) * 10 for r in (1, 2, 3)]
+            if want is not None and abs(sum(a * b for a, b in zip(z, want))) < 0.999:
+                continue
+            if near is not None and within and math.dist(pos, [float(c) for c in near]) > within:
+                continue
+            rows.append({"path": self._path_of(o), "position": [round(c, 3) for c in pos],
+                         "z_axis": [round(c, 4) + 0.0 for c in z]})
+        return rows
+
+    def _dependents(self, comp, occ) -> dict:
+        """What hangs on an occurrence: constraints, and component patterns it is the parent of."""
+        name = self._path_of(occ)
+        cons, pats = [], []
+        for i in range(1, comp.Constraints.Count + 1):
+            c = comp.Constraints.Item(i)
+            try:
+                if name in (self._path_of(c.OccurrenceOne), self._path_of(c.OccurrenceTwo)):
+                    cons.append(c.Name)
+            except Exception:
+                pass
+        try:
+            ps = comp.OccurrencePatterns
+            for i in range(1, ps.Count + 1):
+                p = ps.Item(i)
+                parents = p.ParentComponents
+                if any(self._path_of(parents.Item(j)) == name for j in range(1, parents.Count + 1)):
+                    pats.append(p)
+        except Exception:
+            pass
+        return {"constraints": cons, "patterns": pats}
+
+    def delete_occurrence(self, path, cascade: bool = False, force: bool = False) -> str:
+        """Delete a component. With dependents it first says what depends on it; force
+        deletes (cascade: its component patterns too). Reports what moved afterwards."""
+        comp = self.active_assembly()
+        occ = self._occ(str(path))
+        name = self._path_of(occ)
+        deps = self._dependents(comp, occ)
+        pats = [f"{p.Name} ({p.OccurrencePatternElements.Count} elements)" for p in deps["patterns"]]
+        if (pats or deps["constraints"]) and not force and not cascade:
+            return (f"{name} is not deleted. Depends on it: "
+                    + "; ".join(filter(None, [f"patterns {', '.join(pats)}" if pats else "",
+                                              f"constraints {', '.join(deps['constraints'][:12])}" if deps["constraints"] else ""]))
+                    + ". A pattern's members don't go with it — they recompute somewhere else. "
+                      "cascade=True deletes the patterns too; force=True deletes only this component.")
+        before = self._poses(comp)
+        try:
+            if cascade:
+                for p in deps["patterns"]:
+                    p.Delete()
+                occ = self._occ(str(path)) if self._exists(path) else None
+            if occ is not None:
+                occ.Delete()
+            self.active_document().Update()
+        except Exception as e:
+            blockers = self._open_parents(occ)
+            raise RuntimeError(f"{name} can't be deleted: {describe_com_error(e)}"
+                               + (f"\nOpen documents that reference this level block it: {', '.join(blockers)} — "
+                                  "close them (manage_documents) and retry." if blockers else "")) from None
+        after = self._poses(comp)
+        moved = []
+        for p, m in after.items():
+            old = before.get(p)
+            if old is not None and any(abs(m[i] - old[i]) > 0.01 for i in (3, 7, 11)):
+                moved.append(f"{p} Δ({m[3] - old[3]:.1f}, {m[7] - old[7]:.1f}, {m[11] - old[11]:.1f}) mm")
+        return (f"Deleted {name} ({len(before) - len(after)} part occurrence(s) gone)"
+                + (f"\nMOVED — check these: {'; '.join(moved[:20])}" if moved else ""))
+
+    def _exists(self, path) -> bool:
+        try:
+            self._occ(str(path))
+            return True
+        except Exception:
+            return False
+
+    def _open_parents(self, occ) -> list[str]:
+        try:
+            parent = occ.ContextDefinition.Document
+            top = self.active_document()
+            return [d.DisplayName for d in parent.ReferencingDocuments if d.InternalName != top.InternalName]
+        except Exception:
+            return []
+
+    def open_document(self, path: str) -> str:
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"File not found: {path}")
+        doc = self._silently(lambda: self.app.Documents.Open(path, True))
+        return f"Opened {doc.DisplayName} ({doc.AllReferencedDocuments.Count} referenced)"
+
+    def _find_document(self, name_or_path: str):
+        key = name_or_path.lower()
+        for d in self.app.Documents:
+            if key in (d.DisplayName.lower(), (d.FullFileName or "").lower(),
+                       os.path.splitext(d.DisplayName)[0].lower()):
+                return d
+        raise RuntimeError(f"No open document {name_or_path!r} — see manage_documents list")
+
+    def close_document(self, name_or_path: str, discard: bool = False) -> str:
+        d = self._find_document(name_or_path)
+        if d.Dirty and not discard and not self._library_reason(d, self.library_folders()):
+            raise RuntimeError(f"{d.DisplayName} has unsaved changes — save_document, or discard=True")
+        name = d.DisplayName
+        d.Close(True)
+        return f"Closed {name}"
+
+    def close_all(self, discard: bool = False, quit_inventor: bool = False) -> str:
+        """Close every document. Refuses while the user's own files are dirty; protected
+        (library / Content Center) files never count — Inventor marks those dirty by itself."""
+        folders = self.library_folders()
+        mine = [d.DisplayName for d in self.app.Documents if d.Dirty and d.FullFileName
+                and not self._library_reason(d, folders)]
+        if mine and not discard:
+            raise RuntimeError(f"{len(mine)} of your files have unsaved changes: {', '.join(mine[:20])} — "
+                               "save them, or discard=True")
+        n = self.app.Documents.Count
+        self.app.Documents.CloseAll(False)
+        left = self.app.Documents.Count
+        if left:  # CloseAll leaves documents something still references
+            self.app.Documents.CloseAll(True)
+        msg = f"Closed {n - self.app.Documents.Count} of {n} document(s)"
+        if quit_inventor:
+            self.app.Quit()
+            self._app = None
+            msg += ", Inventor quit"
+        return msg
+
+    def hole_along(self, point, direction, diameter: float, depth: float = 0, tapped: bool = False,
+                   pitch: float | None = None) -> str:
+        """A hole at an absolute point, drilling along direction — no sketch axes involved.
+        Fails, leaving nothing behind, if no material was removed."""
+        import math
+        doc = self.active_document()
+        comp = self.active_part()
+        tg = self._tg()
+        hf = comp.Features.HoleFeatures
+        n = math.sqrt(sum(float(c) ** 2 for c in direction))
+        d = [float(c) / n for c in direction]
+        p = tg.CreatePoint(*(float(c) / 10 for c in point))
+        wp = comp.WorkPoints.AddFixed(p)
+        wa = comp.WorkAxes.AddFixed(p, tg.CreateUnitVector(*d))
+        wp.Visible = wa.Visible = False
+        placement = hf.CreatePointPlacementDefinition(wp, wa)
+        if tapped:
+            nominal = int(round(diameter))
+            pitch = pitch or self._METRIC_COARSE_PITCH.get(nominal)
+            if pitch is None:
+                raise ValueError(f"No standard coarse pitch for M{nominal} — pass pitch")
+            arg = hf.CreateTapInfo(True, "ISO Metric profile", f"M{nominal}x{pitch:g}", "6H", True)
+        else:
+            arg = diameter / 10
+        v0 = comp.MassProperties.Volume
+        for way in (kPositiveExtentDirection, kNegativeExtentDirection):
+            try:
+                f = (hf.AddDrilledByThroughAllExtent(placement, arg, way) if depth <= 0
+                     else hf.AddDrilledByDistanceExtent(placement, arg, depth / 10, way))
+            except Exception:
+                continue
+            doc.Update()
+            removed = (v0 - comp.MassProperties.Volume) * 1000
+            if removed > 1e-3:
+                return f"Hole {f.Name} Ø{diameter} at {list(point)} along {list(direction)}: removed {removed:.0f} mm³"
+            f.Delete()
+        wa.Delete()
+        wp.Delete()
+        raise RuntimeError(f"A hole at {list(point)} along {list(direction)} removes no material — is the "
+                           "point on or above the body, the direction pointing into it?")
 
     # ---------- Faces of nested components, constraints by face ----------
     #
@@ -3752,6 +4133,21 @@ class InventorConnection:
                 info["diameter"] = round(g.Radius * 20, 3)
         return info
 
+    @staticmethod
+    def _face_matches(info, surface, normal, at, diameter, min_area, tolerance) -> bool:
+        import math
+        if surface and info["type"] != surface.lower():
+            return False
+        if info["area_mm2"] < min_area:
+            return False
+        if normal is not None:
+            ln = math.sqrt(sum(float(c) ** 2 for c in normal))
+            if "normal" not in info or sum(a * float(b) / ln for a, b in zip(info["normal"], normal)) < 0.9998:
+                return False
+        if at and any(abs(info["center"]["XYZ".index(k.upper())] - float(v)) > tolerance for k, v in at.items()):
+            return False
+        return not diameter or abs(info.get("diameter", -1) - diameter) <= tolerance
+
     def assembly_faces(self, path: str, surface: str = "", normal=None, at: dict | None = None,
                        diameter: float = 0, min_area: float = 0, max_count: int = 30,
                        tolerance: float = 0.05) -> list[dict]:
@@ -3761,10 +4157,6 @@ class InventorConnection:
         constrain_faces."""
         import math
         leaves = self._leaves(self._occ(path), path)
-        want_n = None
-        if normal is not None:
-            ln = math.sqrt(sum(float(c) ** 2 for c in normal))
-            want_n = [float(c) / ln for c in normal]
         out = []
         for leaf_path, occ in leaves:
             bodies = occ.SurfaceBodies
@@ -3776,15 +4168,7 @@ class InventorConnection:
                     if surface and st != surface.lower():
                         continue
                     info = self._face_info(f)
-                    if info["area_mm2"] < min_area:
-                        continue
-                    if want_n is not None and (
-                            "normal" not in info or sum(a * b for a, b in zip(info["normal"], want_n)) < 0.9998):
-                        continue
-                    if at and any(abs(info["center"]["XYZ".index(k.upper())] - float(v)) > tolerance
-                                  for k, v in at.items()):
-                        continue
-                    if diameter and abs(info.get("diameter", -1) - diameter) > tolerance:
+                    if not self._face_matches(info, "", normal, at, diameter, min_area, tolerance):
                         continue
                     info["ref"] = f"{leaf_path}#{'B%d' % bi if bi > 1 else ''}F{fi}"
                     out.append(info)
@@ -3802,13 +4186,14 @@ class InventorConnection:
         g = geo.upper()
         if g in ("XY", "XZ", "YZ", "X", "Y", "Z", "ORIGIN"):
             return self._origin_proxy(occ, g), occ
-        m = re.fullmatch(r"(?:B(\d+))?F(\d+)", g)
+        m = re.fullmatch(r"(?:B(\d+))?([FE])(\d+)", g)
         if not m:
-            raise ValueError(f"{ref!r}: after '#' use F<n>, B<n>F<n> or XY/XZ/YZ/X/Y/Z/ORIGIN")
+            raise ValueError(f"{ref!r}: after '#' use F<n>, E<n>, B<n>F<n> or XY/XZ/YZ/X/Y/Z/ORIGIN")
         bodies = occ.SurfaceBodies
         if not bodies.Count:
             raise ValueError(f"{path} has no bodies — faces belong to parts; give the path down to one")
-        return bodies.Item(int(m[1] or 1)).Faces.Item(int(m[2])), occ
+        body = bodies.Item(int(m[1] or 1))
+        return (body.Faces if m[2] == "F" else body.Edges).Item(int(m[3])), occ
 
     def _poses(self, comp) -> dict:
         """Position and axes of every part occurrence (mm), to see what a change moved."""
@@ -3830,7 +4215,7 @@ class InventorConnection:
             return occ.Name
 
     def constrain_faces(self, a: str, b: str, kind: str = "mate", offset: float = 0,
-                        angle: float = 0, a_at: dict | None = None) -> str:
+                        angle: float = 0, a_at: dict | None = None, axes_opposed: bool = True) -> str:
         """Constrain two faces / origin geometries of components anywhere in the assembly
         (refs from assembly_faces, or "path#XY"). a_at={"Z": 182.5}: where a's face must end
         up — if it lands elsewhere, the offset is tried with the other sign. Reports every
@@ -3850,7 +4235,9 @@ class InventorConnection:
                 return comp.Constraints.AddFlushConstraint(ga, gb, off / 10.0)
             if k == "angle":
                 return comp.Constraints.AddAngleConstraint(ga, gb, math.radians(angle))
-            raise ValueError(f"Unknown kind '{kind}'. Use mate, flush or angle.")
+            if k == "insert":
+                return comp.Constraints.AddInsertConstraint(ga, gb, axes_opposed, off / 10.0)
+            raise ValueError(f"Unknown kind '{kind}'. Use mate, flush, angle or insert.")
 
         def where():
             ga2, _ = self._ref(a)  # re-resolve: the proxy is fresh after the update
@@ -3866,7 +4253,7 @@ class InventorConnection:
         c = add(offset)
         doc.Update()
         flipped = False
-        if not lands() and offset and k in ("mate", "flush"):
+        if not lands() and offset and k in ("mate", "flush", "insert"):
             c.Delete()
             c = add(-offset)
             doc.Update()

@@ -65,7 +65,7 @@ check("tool names are unique", len(names) == len(set(names)))
 missing = [t.name for t in pkg_tools if not (t.description or "").strip()]
 check("every tool has a description", not missing, ", ".join(missing))
 
-flange = next(t for t in pkg_tools if t.name == "flange")
+flange = next(t for t in pkg_tools if t.name == "add_flange")
 schema = getattr(flange, "input_schema", None) or getattr(flange, "inputSchema", {})  # mcp 2 renamed it
 check("wrapped tools keep their parameters",
       {"edge_indices", "distance", "auto_miter"} <= set(schema.get("properties", {})))
@@ -111,7 +111,7 @@ check("call_status(wait_seconds) returns as soon as the call finishes",
 check("…only once", "already returned" in status())
 
 print("Several Inventors (no Inventor needed):")
-com_tools = [t for t in pkg_tools if t.name not in ("call_status", "list_instances")]
+com_tools = [t for t in pkg_tools if t.name not in ("manage_call", "list_instances")]
 no_inst = [t.name for t in com_tools if "instance" not in (getattr(t, "input_schema", None) or t.inputSchema)["properties"]]
 check("every Inventor tool takes an instance parameter", not no_inst, ", ".join(no_inst))
 B = srv._instances.setdefault("second", srv._Instance("second"))
@@ -274,7 +274,7 @@ member, clean = fake_doc("U 100 L1500.ipt", root, member=True), fake_doc("pin.ip
 asm = fake_doc("top.iam", root, refs=[mine, sub, std, std2, member, clean])
 c = api.InventorConnection()
 c._app = fake_app(asm)
-out = c.save_document()
+out = c.save_document(save_dependents=True)
 check("dirty project files are saved one by one, without dependents",
       mine.saves == [False] and sub.saves == [False] and asm.saves == [False] and clean.saves == [],
       out.splitlines()[1])
@@ -304,7 +304,7 @@ import base64, tempfile
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
-def fake_views(self, views, width, height, white, focus, sketches, up):
+def fake_views(self, views, width, height, white, focus, sketches, up, isolate):
     folder = tempfile.mkdtemp()
     paths = [os.path.join(folder, f"{v}.png") for v in views]
     for p in paths:
@@ -314,11 +314,17 @@ def fake_views(self, views, width, height, white, focus, sketches, up):
 
 real_views = srv._api.InventorConnection.view_images
 srv._api.InventorConnection.view_images = fake_views
-result = asyncio.run(pkg.mcp.call_tool("view_image", {"views": "iso,top"}))
+result = asyncio.run(pkg.mcp.call_tool("capture_view", {"views": "iso,top"}))
 srv._api.InventorConnection.view_images = real_views
 blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
 kinds = [getattr(b, "type", None) for b in blocks]
-check("view_image reaches the client as images", kinds == ["image", "image"], str(kinds))
+check("capture_view reaches the client as images", kinds == ["image", "image"], str(kinds))
+
+os.environ["INVENTOR_MCP_PROTECTED"] = r"C:\vendor\*;D:\orig"
+reason = api_paths = importlib.import_module("inventor_mcp_server.inventor_api").InventorConnection._path_reason
+check("protected paths: a glob and a folder", reason(r"C:\vendor\a.ipt", []) == reason(r"D:\orig\b.iam", []) == "protected path"
+      and reason(r"C:\work\a.ipt", []) == "", str(reason(r"D:\orig\b.iam", [])))
+del os.environ["INVENTOR_MCP_PROTECTED"]
 
 print("Profiles with arcs (no Inventor needed):")
 import math
