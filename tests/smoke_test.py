@@ -208,6 +208,48 @@ def sheet_metal_tests(inv, run):
 _TEMP_DIRS = []   # removed together with the scratch documents (unless --keep)
 
 
+def output_tests(inv, run):
+    """What leaves the model: side holes, flat pattern DXF, drawing PDF (writes to a temp folder)."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="inventor_mcp_smoke_")
+    _TEMP_DIRS.append(tmp)
+
+    run.step("create_part side-hole box", lambda: inv.create_part("smoke_side"))
+    run.step("create_sketch(XY) box", lambda: inv.create_sketch("XY"))
+    run.step("draw_rectangle box", lambda: inv.draw_rectangle(0, 0, 80, 60))
+    run.step("extrude box 20mm", lambda: inv.extrude(20))
+    run.step("hole_along into a side face",
+             lambda: inv.hole_along([40, 0, 10], [-1, 0, 0], 6, depth=15))
+    run.step("hole_along off the body raises",
+             lambda: _expect_error(lambda: inv.hole_along([40, 500, 10], [-1, 0, 0], 6), "removes no material"))
+    run.step("status of a part",
+             lambda: "ok" if inv.get_document_info()["type_name"] == "part"
+             and inv.get_document_info()["bodies_count"] == 1 else _raise(str(inv.get_document_info())))
+    run.step("flat pattern of a plain part raises",
+             lambda: _expect_error(lambda: inv.flat_pattern(), "not a sheet metal part"))
+
+    dxf = os.path.join(tmp, "flat.dxf")
+    pdf = os.path.join(tmp, "flat.pdf")
+    run.step("create_part(sheet_metal) flat", lambda: inv.create_part("smoke_flat", "sheet_metal"))
+    run.step("set_sheet_metal_thickness 2", lambda: inv.set_sheet_metal_thickness(2))
+    run.step("create_sketch(XY) flat", lambda: inv.create_sketch("XY"))
+    run.step("draw_rectangle flat", lambda: inv.draw_rectangle(0, 0, 80, 50))
+    run.step("sheet_metal_face flat", lambda: inv.sheet_metal_face())
+    flat = run.step("flat_pattern DXF", lambda: inv.flat_pattern(dxf))
+    run.step("DXF written, blank size reported",
+             lambda: "ok" if flat and os.path.getsize(dxf) > 0 and sorted(flat["flat_mm"]) == [50, 80]
+             else _raise(str(flat)))
+    run.step("save flat part", lambda: inv.save_document(os.path.join(tmp, "smoke_flat.ipt")))
+    run.step("make_drawing PDF", lambda: inv.make_drawing(pdf, views="front,top,right"))
+    run.step("PDF written", lambda: "ok" if os.path.getsize(pdf) > 0 else _raise("empty PDF"))
+
+    def drawing_status():
+        inv.app.Documents.Add(api.kDrawingDocumentObject, "", True)
+        info = inv.get_document_info()
+        return "ok" if info["type_name"] == "drawing" and info["sheets_count"] >= 1 else _raise(str(info))
+    run.step("status of a drawing", drawing_status)
+
+
 def document_tests(inv, run):
     """Active-document tracking and dialog-free saving (writes to a temp folder)."""
     import tempfile
@@ -450,6 +492,8 @@ def run_all(inv, run, keep):
     sheet_metal_tests(inv, run)
     print("\nSheet metal box (auto-miter, cut_on_face, corner_round):")
     sheet_metal_box_tests(inv, run)
+    print("\nOutput (side holes, flat pattern DXF, drawing PDF, status):")
+    output_tests(inv, run)
     print("\nDocuments (active document, dialog-free save):")
     document_tests(inv, run)
     print("\nAssembly tools (import_step, placement, interference, sweep):")

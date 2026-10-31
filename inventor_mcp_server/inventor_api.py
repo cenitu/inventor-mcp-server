@@ -2072,15 +2072,24 @@ class InventorConnection:
 
     def get_document_info(self) -> dict:
         doc = self.active_document()
-        comp = doc.ComponentDefinition
         info = {
             "name": doc.DisplayName,
             "full_path": doc.FullFileName,
             "type": str(doc.DocumentType),
-            "sketches_count": comp.Sketches.Count,
-            "features_count": comp.Features.Count if hasattr(comp.Features, "Count") else 0,
-            "bodies_count": comp.SurfaceBodies.Count,
+            "type_name": {kPartDocumentObject: "part", kAssemblyDocumentObject: "assembly",
+                          kDrawingDocumentObject: "drawing"}.get(doc.DocumentType, "other"),
         }
+        if doc.DocumentType == kDrawingDocumentObject:  # a drawing has no ComponentDefinition
+            info["sheets_count"] = doc.Sheets.Count
+            return info
+        comp = doc.ComponentDefinition
+        if doc.DocumentType == kAssemblyDocumentObject:
+            info["components_count"] = comp.Occurrences.Count
+            info["constraints_count"] = comp.Constraints.Count
+            return info
+        info["sketches_count"] = comp.Sketches.Count
+        info["features_count"] = comp.Features.Count if hasattr(comp.Features, "Count") else 0
+        info["bodies_count"] = comp.SurfaceBodies.Count
         if comp.SurfaceBodies.Count > 0:
             body = comp.SurfaceBodies.Item(1)
             info["edges_count"] = body.Edges.Count
@@ -2288,11 +2297,9 @@ class InventorConnection:
     def sheet_metal_cut(
         self,
         sketch_index: int | None = None,
-        cut_across_bends: bool = False,
     ) -> str:
         """Cut through the sheet using a sketch profile. Sheet Metal Cut.
-        Default: cut perpendicular to the face (through thickness).
-        cut_across_bends: if True, cut wraps around bends (unfolds first).
+        Cuts perpendicular to the face (through thickness).
         """
         comp = self.active_part()
         sketch = self._get_sketch(sketch_index)
