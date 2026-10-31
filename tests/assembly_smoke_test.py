@@ -31,13 +31,13 @@ def build_parts(inv, run, workdir):
     run.step("plate rectangle", lambda: inv.draw_rectangle(0, 0, 40, 40))
     run.step("plate extrude", lambda: inv.extrude(10))
     run.step("plate hole", lambda: inv.hole(0, 0, diameter=10))
-    run.step("plate save", lambda: inv.save_document(plate))
+    run.step("plate save", lambda: inv.save_document(plate, overwrite=True))
 
     run.step("part: pin", lambda: inv.create_part("smoke_pin"))
     run.step("pin sketch", lambda: inv.create_sketch("XY"))
     run.step("pin circle", lambda: inv.draw_circle(0, 0, 10))
     run.step("pin extrude", lambda: inv.extrude(30))
-    run.step("pin save", lambda: inv.save_document(pin))
+    run.step("pin save", lambda: inv.save_document(pin, overwrite=True))
 
     return plate, pin
 
