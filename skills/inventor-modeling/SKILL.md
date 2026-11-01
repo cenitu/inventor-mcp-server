@@ -200,6 +200,8 @@ inv.draw_rectangle(x=100, y=377, width=150, height=86)    # PSU
 inv.sheet_metal_cut()       # cut depth = Thickness automatically (parametric!)
 ```
 
+Bent profiles need no sketch: `add_sheet_profile` makes an L, U, C, Z or hat from outer sizes.
+
 **Three rules for sheet metal that prevent rework:**
 
 1. **Cuts must be Sheet Metal Cut, not Extrude cut.** Sheet Metal Cut binds depth to the

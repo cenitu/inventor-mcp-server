@@ -66,6 +66,23 @@ def assembly_tests(inv, run, plate, pin):
              lambda: inv.constrain(1, "XZ", 2, "XZ", "flush", offset=5))
     run.step("angle Z axes",
              lambda: inv.constrain(1, "Z", 2, "Z", "angle", angle=0))
+    def edit_offset():
+        out = inv.edit_constraint(1, 7.5)
+        if "→ 7.5 mm" not in out:
+            _raise(out)
+        return out
+    run.step("edit_constraint offset", edit_offset)
+
+    def edit_angle():
+        out = inv.edit_constraint(2, 45)
+        if "→ 45 deg" not in out:
+            _raise(out)
+        inv.edit_constraint(2, 90)
+        return out
+    run.step("edit_constraint angle", edit_angle)
+    run.step("list_constraints shows the offset",
+             lambda: inv.list_constraints() if "7" in inv.list_constraints() else _raise("no offset listed"))
+
     run.step("delete both constraints",
              lambda: (inv.delete_constraint(2), inv.delete_constraint(1))[1])
 
@@ -82,6 +99,28 @@ def assembly_tests(inv, run, plate, pin):
     else:
         run.failed.append(("insert", "no circular edges found"))
         print("  FAIL  insert: no circular edges found")
+
+    def assembly_cut():
+        out = inv.assembly_cut("z", circles=[[15, 15, 0, 4]], participants=["smoke_plate:1"])
+        if "smoke_plate:1 -126 mm³" not in out:
+            _raise(out)
+        return out
+    run.step("assembly_cut through the plate only", assembly_cut)
+
+    def cut_that_misses():
+        comp = inv.active_assembly()
+        n = comp.Sketches.Count, comp.Features.Count
+        try:
+            inv.assembly_cut("z", circles=[[5000, 0, 0, 4]])
+        except RuntimeError as e:
+            if "nothing was left" not in str(e):
+                raise
+        else:
+            _raise("a cut that misses did not raise")
+        if (comp.Sketches.Count, comp.Features.Count) != n:
+            _raise("a failed cut left a sketch or feature behind")
+        return "ok"
+    run.step("assembly_cut that misses leaves nothing", cut_that_misses)
 
     run.step("ground pin", lambda: inv.ground_occurrence(2, True))
     run.step("unground pin", lambda: inv.ground_occurrence(2, False))

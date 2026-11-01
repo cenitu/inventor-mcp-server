@@ -418,6 +418,22 @@ with the short edges running through the thickness at the corners.
 **Flat Pattern** is the acid test: if it unfolds, your geometry is real sheet
 metal; extrude-built "walls" look identical but won't unfold.
 
+## Contour flange and assembly cuts
+
+- `ContourFlangeFeatures.CreateContourFlangeDefinition` wants a `Path`
+  (`comp.Features.CreatePath(first_line)`), not a Profile: a Profile is a type mismatch.
+- Material lies on the right of the direction of travel, seen from the sketch normal, so the
+  sketch line is not the centre of the sheet. There is no flip flag: choose the point order.
+- `SetDistanceExtent(cm, kPositiveExtentDirection)` works; the negative direction fails on the
+  same definition.
+- In an assembly `WorkPlanes.AddByPlaneAndOffset` fails with E_FAIL; `AddFixed` works.
+- An `ExtrudeFeature` in an assembly starts with the occurrences its shape meets as `Participants`.
+  `RemoveParticipant` with one that isn't a participant is E_INVALIDARG. The cut changes the
+  occurrence only: `Definition.MassProperties` keeps the part's volume, `occ.SurfaceBodies` loses it.
+- A cut that meets nothing fails in `Add` with E_FAIL, leaving its sketch and plane behind.
+- `constraint.Offset` and `.Angle` are Parameters; setting `.Value` (cm, rad) avoids the decimal
+  separator of `.Expression`. `Offset` raises on constraints that have none, as `Angle` does.
+
 ## Assembly (IAM)
 
 ```python

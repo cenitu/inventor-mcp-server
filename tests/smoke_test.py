@@ -420,6 +420,23 @@ def sheet_metal_box_tests(inv, run):
              lambda: "ok" if inv.active_part().Features.Count == n_feat
              else _raise("an empty Cut feature was left in the tree"))
 
+    def profile(kind, size, **kw):
+        def go():
+            inv.create_part(f"smoke_profile_{kind}", "sheet_metal")
+            inv.set_sheet_metal_thickness(1.5)
+            out = inv.sheet_profile(kind, length=100, **kw)
+            if "WARNING" in out or size not in out:
+                _raise(out)
+            return out
+        return go
+    run.step("sheet_profile L", profile("L", "50 x 30 x 100", width=50, height=30))
+    run.step("sheet_profile U, own radius", profile("U", "60 x 30 x 100", width=60, height=30, bend_radius=2.5))
+    run.step("sheet_profile C", profile("C", "60 x 40 x 100", width=60, height=40, flange=12))
+    run.step("sheet_profile Z", profile("Z", "68.5 x 50 x 100", width=40, height=50, flange=30))
+    run.step("sheet_profile hat", profile("hat", "80 x 30 x 100", width=40, height=30, flange=20))
+    run.step("sheet_profile on a part with a body raises",
+             lambda: _expect_error(lambda: inv.sheet_profile("L", 30, 30, 50), "already has a body"))
+
     run.step("create_part(sheet_metal) plate", lambda: inv.create_part("smoke_plate", "sheet_metal"))
     run.step("set_sheet_metal_thickness 2", lambda: inv.set_sheet_metal_thickness(2))
     run.step("create_sketch(XY) plate", lambda: inv.create_sketch("XY"))
