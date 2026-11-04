@@ -60,6 +60,10 @@ kAlignedDim    = 19203
 
 # AngleConstraintSolutionTypeEnum (4th argument of AddAngleConstraint)
 # 78593=kDirectedSolution
+
+# ShellDirectionEnum: 41217=Inside, 41218=Outside, 41219=BothSides
+# SweepTypeEnum: 104449=kPathSweepType
+# SweepProfileOrientationEnum: 59649=kNormalToPath, 59650=kParallelToOriginalProfile
 ```
 
 ## Internal units are CENTIMETERS
@@ -279,6 +283,21 @@ Put ALL edges in ONE call — edge indices renumber after each feature.
 - Preferred axis: a WorkAxis (`comp.WorkAxes.Item(1/2/3)` = X/Y/Z) — no
   construction line needed in the sketch.
 - Do NOT use `CreateRevolveDefinition` + `SetAngleExtent`.
+
+## Shell, loft, sweep
+
+- Shell: `ShellFeatures.CreateShellDefinition(FaceCollection, thickness_cm, ShellDirectionEnum)`
+  then `Add(def)`. The faces in the collection are the ones left open; an empty
+  `CreateFaceCollection()` gives a closed hollow body.
+- Loft: `LoftFeatures.CreateLoftDefinition(ObjectCollection of Profiles, operation)`, set
+  `def.Closed`, then `Add(def)`. One profile per sketch, in blend order.
+- Sweep: build the path with `comp.Features.CreatePath(sketch_curve)` — it collects every
+  curve joined end to end to that one. `SweepFeatures.CreatePath` with the same curve fails
+  with E_INVALIDARG (2027.1). Then `SweepFeatures.CreateSweepDefinition(kPathSweepType,
+  profile, path, operation)`, set `ProfileOrientation`, `TaperAngle`, `TwistAngle` (radians)
+  and `Add(def)`. Setting `TwistAngle` afterwards through `feature.Definition` fails (E_FAIL).
+- A path arc that doesn't join its line tangentially, or that turns the long way round
+  (draw_arc goes counter-clockwise from start to end), makes the sweep fail with a bare E_FAIL.
 
 ## HoleFeature
 

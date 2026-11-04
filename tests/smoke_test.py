@@ -65,6 +65,16 @@ def check_enums(inv, run):
             "kNegativeExtentDirection": api.kNegativeExtentDirection,
             "kSymmetricExtentDirection": api.kSymmetricExtentDirection,
         },
+        "ShellDirectionEnum": {
+            "kInsideShellDirection": api.kInsideShellDirection,
+            "kOutsideShellDirection": api.kOutsideShellDirection,
+            "kBothSidesShellDirection": api.kBothSidesShellDirection,
+        },
+        "SweepTypeEnum": {"kPathSweepType": api.kPathSweepType},
+        "SweepProfileOrientationEnum": {
+            "kNormalToPath": api.kNormalToPath,
+            "kParallelToOriginalProfile": api.kParallelToOriginalProfile,
+        },
     }
 
     # Locate the Inventor type library without touching win32com's gencache
@@ -174,6 +184,31 @@ def part_tests(inv, run):
     run.step("create_sketch(XY) #3", lambda: inv.create_sketch("XY"))
     run.step("draw_rectangle offset", lambda: inv.draw_rectangle(30, 10, 20, 20))
     run.step("revolve 360 about Y", lambda: inv.revolve(360, None, "Y", "join"))
+
+    def expect_volume(result, volume):
+        v = float(result.split("| V ")[1].split()[0])
+        if abs(v - volume) > 1:
+            raise AssertionError(f"volume {v:.0f} mm³, expected {volume:.0f}: {result}")
+        return result
+
+    run.step("create_part(metric) #4", lambda: inv.create_part("smoke_shell"))
+    run.step("box 80x60x40", lambda: (inv.create_sketch("XY"), inv.draw_rectangle(0, 0, 80, 60),
+                                      inv.extrude(40))[-1])
+    run.step("shell 3mm, top open", lambda: expect_volume(
+        inv.shell(3, [inv.find_faces(normal=[0, 0, 1])[0]["index"]]), 80 * 60 * 40 - 74 * 54 * 37))
+
+    run.step("create_part(metric) #5", lambda: inv.create_part("smoke_loft"))
+    run.step("loft sections", lambda: (inv.create_sketch("XY"), inv.draw_rectangle(0, 0, 60, 40),
+                                       inv.create_sketch("XY", offset=50), inv.draw_circle(0, 0, 30))[-1])
+    run.step("loft rectangle to circle", lambda: inv.loft([1, 2]))
+
+    import math
+    run.step("create_part(metric) #6", lambda: inv.create_part("smoke_sweep"))
+    run.step("sweep path line + arc", lambda: (inv.create_sketch("XZ"), inv.draw_line(0, 0, 0, 100),
+                                               inv.draw_arc(50, 150, 0, 100, cx=50, cy=100))[-1])
+    run.step("sweep profile D10", lambda: (inv.create_sketch("XY"), inv.draw_circle(0, 0, 10))[-1])
+    run.step("sweep along path", lambda: expect_volume(
+        inv.sweep(1), math.pi * 25 * (100 + math.pi * 50 / 2)))
 
 
 def sheet_metal_tests(inv, run):

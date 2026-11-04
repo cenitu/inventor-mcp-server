@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `shell`, `loft`, `sweep`: hollow a body leaving chosen faces open; blend between the profiles of
+  two or more sketches; sweep a profile along a path sketch, with taper and twist. Each returns
+  the volume / topology change.
 - `add_sheet_profile`: an L, U, C, Z or hat profile as one contour flange in an empty sheet metal
   part, from outer sizes. The finished size is checked.
 - `add_assembly_cut`: cut placed components at assembly level, from world coordinates, on the

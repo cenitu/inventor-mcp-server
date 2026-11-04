@@ -51,6 +51,16 @@ kAlignedDim    = 19203
 kLineSegmentCurve = 5123
 kCircleCurve      = 5124
 
+# ShellDirectionEnum
+kInsideShellDirection = 41217
+kOutsideShellDirection = 41218
+kBothSidesShellDirection = 41219
+
+# SweepTypeEnum / SweepProfileOrientationEnum
+kPathSweepType = 104449
+kNormalToPath = 59649
+kParallelToOriginalProfile = 59650
+
 # SurfaceTypeEnum (Face.SurfaceType)
 SURFACE_TYPES = {5889: "Unknown", 5890: "Plane", 5891: "Cylinder", 5892: "EllipticCylinder",
                  5893: "Cone", 5894: "EllipticCone", 5895: "Torus", 5896: "Sphere", 5897: "BSpline"}
@@ -1525,6 +1535,87 @@ class InventorConnection:
         before = self._vol_state()
         comp.Features.ChamferFeatures.AddUsingDistance(ec, d_cm)
         return f"Chamfer {distance}mm on {ec.Count} edge(s){self._fmt_delta(before)}"
+
+    _OPERATIONS = {"join": kJoinOperation, "cut": kCutOperation,
+                   "intersect": kIntersectOperation, "new": kNewBodyOperation}
+
+    def _operation(self, operation: str) -> int:
+        try:
+            return self._OPERATIONS[operation.lower()]
+        except KeyError:
+            raise ValueError(f"operation must be one of {', '.join(self._OPERATIONS)}, not {operation!r}")
+
+    def shell(self, thickness: float = 2, remove_faces: list[int] | None = None,
+              direction: str = "inside") -> str:
+        """Hollow body 1 to a wall of `thickness` mm, leaving the faces in remove_faces
+        (1-based, from find_faces) open. No faces = a closed hollow body.
+        direction: "inside" (outer size kept), "outside" or "both"."""
+        comp = self.active_part()
+        dirs = {"inside": kInsideShellDirection, "outside": kOutsideShellDirection,
+                "both": kBothSidesShellDirection}
+        if direction.lower() not in dirs:
+            raise ValueError(f"direction must be inside, outside or both, not {direction!r}")
+        body = comp.SurfaceBodies.Item(1)
+        faces = self.app.TransientObjects.CreateFaceCollection()
+        for idx in remove_faces or []:
+            if not 1 <= idx <= body.Faces.Count:
+                raise ValueError(f"face {idx} out of range: the body has {body.Faces.Count} faces")
+            faces.Add(body.Faces.Item(idx))
+        before = self._vol_state()
+        sf = comp.Features.ShellFeatures
+        definition = sf.CreateShellDefinition(faces, thickness / 10.0, dirs[direction.lower()])
+        feature = sf.Add(definition)
+        return (f"Shell {thickness}mm {direction}, {faces.Count} face(s) open: {feature.Name}"
+                f"{self._fmt_delta(before)}")
+
+    def loft(self, sketch_indices: list[int], operation: str = "join", closed: bool = False) -> str:
+        """Blend the closed profiles of two or more sketches, in the order given.
+        closed: also join the last section back to the first (a ring)."""
+        comp = self.active_part()
+        if len(sketch_indices) < 2:
+            raise ValueError("a loft needs at least two sketches")
+        sections = self.app.TransientObjects.CreateObjectCollection()
+        for idx in sketch_indices:
+            sections.Add(self._solid_profile(self._get_sketch(idx)))
+        before = self._vol_state()
+        lf = comp.Features.LoftFeatures
+        definition = lf.CreateLoftDefinition(sections, self._operation(operation))
+        definition.Closed = closed
+        feature = lf.Add(definition)
+        return (f"Loft through {len(sketch_indices)} sketch(es) ({operation}): {feature.Name}"
+                f"{self._fmt_delta(before)}")
+
+    def sweep(self, path_sketch: int, sketch_index: int | None = None, operation: str = "join",
+              orientation: str = "normal", taper: float = 0, twist: float = 0) -> str:
+        """Sweep a sketch's closed profile along the curves of another sketch.
+
+        path_sketch: sketch holding the path; its curves joined end to end are followed.
+        orientation: "normal" (profile stays square to the path) or "parallel"
+        (profile keeps its original direction). taper / twist in degrees.
+        """
+        import math
+        comp = self.active_part()
+        if path_sketch == sketch_index or (sketch_index is None and path_sketch == comp.Sketches.Count):
+            raise ValueError("the path must be in another sketch than the profile")
+        orient = {"normal": kNormalToPath, "parallel": kParallelToOriginalProfile}
+        if orientation.lower() not in orient:
+            raise ValueError(f"orientation must be normal or parallel, not {orientation!r}")
+        profile = self._solid_profile(self._get_sketch(sketch_index))
+        curves = self._sketch_curves(self._get_sketch(path_sketch))
+        if not curves:
+            raise ValueError(f"Sketch{path_sketch} has no curves for a path")
+        sf = comp.Features.SweepFeatures
+        path = comp.Features.CreatePath(curves[0][1])
+        before = self._vol_state()
+        definition = sf.CreateSweepDefinition(kPathSweepType, profile, path, self._operation(operation))
+        definition.ProfileOrientation = orient[orientation.lower()]
+        if taper:
+            definition.TaperAngle = math.radians(taper)
+        if twist:
+            definition.TwistAngle = math.radians(twist)
+        feature = sf.Add(definition)
+        return (f"Sweep along Sketch{path_sketch} ({path.Count} curve(s), {operation}): {feature.Name}"
+                f"{self._fmt_delta(before)}")
 
     # Standard ISO metric coarse thread pitches (mm)
     _METRIC_COARSE_PITCH = {

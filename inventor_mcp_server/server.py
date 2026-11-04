@@ -1788,6 +1788,67 @@ def chamfer(distance: float = 2, edge_indices: str = "1") -> str:
 
 
 @tool()
+def shell(thickness: float = 2, remove_faces: str = "", direction: str = "inside") -> str:
+    """Hollow the active part's first body into a wall of even thickness — a housing, cup or
+    box — leaving the chosen faces open. For sheet metal use add_sheet_metal_face and add_flange.
+
+    Pick the open faces with find_faces (e.g. normal=[0,0,1] for the top) right before this call.
+    Returns the feature name and the change: a shell removes volume; a wall too thick for the
+    body fails.
+
+    Args:
+        thickness: Wall thickness in mm.
+        remove_faces: Comma-separated face numbers from find_faces to leave open, e.g. "5".
+            Empty = a closed hollow body.
+        direction: "inside" (the outer size stays), "outside" or "both".
+    """
+    faces = [int(i) for i in remove_faces.split(",") if i.strip()]
+    return inv.shell(thickness, faces, direction)
+
+
+@tool()
+def loft(sketch_indices: str, operation: str = "join", closed: bool = False) -> str:
+    """Blend between the closed profiles of two or more sketches on different planes — a
+    rectangle-to-circle transition, a duct, a tapered boss. For a constant profile along a
+    curve use sweep; for a straight push, extrude.
+
+    Put each section in its own sketch (create_sketch with offset gives parallel planes).
+    Returns the feature name and the volume / topology change.
+
+    Args:
+        sketch_indices: Comma-separated sketch numbers in the order to blend, e.g. "1,2,3".
+        operation: "join" (add), "cut", "intersect" or "new" (a separate body).
+        closed: Also blend the last section back into the first (a ring).
+    """
+    indices = [int(i) for i in sketch_indices.split(",") if i.strip()]
+    return inv.loft(indices, operation, closed)
+
+
+@tool()
+def sweep(path_sketch: int, sketch_index: int = 0, operation: str = "join",
+          orientation: str = "normal", taper: float = 0, twist: float = 0) -> str:
+    """Sweep a sketch's closed profile along a path — a tube, handle, rail or wire form. Not
+    sweep_rotation, which swings assembly components to check collisions.
+
+    The path is a second sketch whose lines and arcs join end to end (draw_line, draw_arc), on
+    a plane across the profile's — e.g. the path on XZ, the profile on XY where the path
+    starts. Arcs must join the lines tangentially, or the profile kinks and the sweep fails.
+    Returns the feature name and the volume / topology change.
+
+    Args:
+        path_sketch: Sketch number holding the path.
+        sketch_index: Sketch number of the profile (0 = latest sketch).
+        operation: "join" (add), "cut", "intersect" or "new" (a separate body).
+        orientation: "normal" (the profile stays square to the path) or "parallel" (it keeps
+            its original direction).
+        taper: Draft angle in degrees; positive grows the profile along the path.
+        twist: Rotation of the profile over the whole path, in degrees.
+    """
+    idx = sketch_index if sketch_index > 0 else None
+    return inv.sweep(path_sketch, idx, operation, orientation, taper, twist)
+
+
+@tool()
 def add_circular_pattern(
     feature_index: int,
     count: int = 8,
