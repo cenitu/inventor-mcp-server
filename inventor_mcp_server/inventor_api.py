@@ -2817,17 +2817,56 @@ class InventorConnection:
         cam.Eye = tg.CreatePoint(center[0] + dx * span * 3, center[1] + dy * span * 3, center[2] + dz * span * 3)
         cam.UpVector = tg.CreateUnitVector(*up)
 
+    _UP = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
+
+    def _custom_view(self, cam, look_from, target, up, box):
+        """Point the camera from look_from (mm) at target (mm; default: the middle of box, or
+        of the model). With a target the picture is framed on it, sized to box / the model;
+        without one the whole model is fitted along that direction."""
+        if box is None:
+            box = self.active_document().ComponentDefinition.RangeBox
+        lo, hi = box.MinPoint, box.MaxPoint
+        eye = [float(c) / 10 for c in look_from]
+        aim = ([float(c) / 10 for c in target] if target is not None
+               else [(lo.X + hi.X) / 2, (lo.Y + hi.Y) / 2, (lo.Z + hi.Z) / 2])
+        d = [a - e for a, e in zip(aim, eye)]
+        length = math.sqrt(sum(c * c for c in d))
+        if length < 1e-6:
+            raise ValueError("look_from and target are the same point")
+        upv = up if not isinstance(up, str) else self._UP.get(up.lower(), (0, 1, 0))
+        n = math.sqrt(sum(float(c) ** 2 for c in upv)) or 1.0
+        upv = [float(c) / n for c in upv]
+        if abs(sum(a * b for a, b in zip(d, upv))) / length > 0.999:  # looking along `up`
+            upv = next(v for v in ((0, 1, 0), (0, 0, 1), (1, 0, 0))
+                       if abs(sum(a * b for a, b in zip(d, v))) / length < 0.999)
+        tg = self._tg()
+        cam.Eye, cam.Target = tg.CreatePoint(*eye), tg.CreatePoint(*aim)
+        cam.UpVector = tg.CreateUnitVector(*upv)
+        if target is None:
+            cam.Fit()
+        else:
+            span = max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z, 0.1) * 1.3
+            cam.SetExtents(span, span)
+
     def view_images(self, views=("iso",), width: int = 800, height: int = 600,
                     white: bool = False, focus: str = "", sketches: bool = False,
-                    up: str = "y", isolate: str = "") -> list[str]:
+                    up="y", isolate: str = "", look_from=None, target=None,
+                    zoom: float = 1.0, perspective: bool = False) -> list[str]:
         """Render the active document from each named view into PNG files and return their
         paths. The camera is put back afterwards, so the user's view doesn't jump.
         focus: occurrence paths, ","-separated — zoom to them instead of the whole model.
-        isolate: occurrence paths — hide every other part while capturing."""
+        isolate: occurrence paths — hide every other part while capturing.
+        look_from / target: mm, model coordinates — the view named "custom"; up: "x"/"y"/"z"
+        or a vector. zoom: 2 = twice as close, every view."""
         import tempfile
-        unknown = [v for v in views if v not in self.VIEWS]
+        unknown = [v for v in views if v not in self.VIEWS and v != "custom"]
         if unknown:
-            raise ValueError(f"Unknown view {', '.join(unknown)} — use {', '.join(self.VIEWS)}")
+            raise ValueError(f"Unknown view {', '.join(unknown)} — use {', '.join(self.VIEWS)}, "
+                             "or custom with look_from")
+        if "custom" in views and look_from is None:
+            raise ValueError("The custom view needs look_from=[x, y, z]")
+        if zoom <= 0:
+            raise ValueError("zoom must be above 0")
         self.active_document()
         view = self.app.ActiveView
         cam = view.Camera
@@ -2850,16 +2889,25 @@ class InventorConnection:
                     pass
         try:
             for name in views:
-                if name != "current":
-                    if up.lower() == "z":
+                custom = name == "custom"
+                if custom:
+                    cam.Perspective = bool(perspective)
+                    self._custom_view(cam, look_from, target, up, box)
+                    cam.Apply()
+                elif name != "current":
+                    if isinstance(up, str) and up.lower() == "z":
                         self._z_up_view(cam, name)
                     else:
                         cam.ViewOrientationType = self.VIEWS[name]
                     cam.Perspective = False
                     cam.Fit()
                     cam.Apply()
-                if box is not None:
+                if box is not None and not (custom and target is not None):
                     self._zoom_to(cam, box)
+                if zoom != 1:
+                    w, h = cam.GetExtents()
+                    cam.SetExtents(w / zoom, h / zoom)
+                    cam.Apply()
                 view.Update()  # the camera change has to be drawn before the picture is taken
                 path = os.path.join(folder, f"{name}.png")
                 cam.SaveAsBitmap(path, int(width), int(height), *colors)
@@ -4178,6 +4226,103 @@ class InventorConnection:
             rows.append({"path": self._path_of(o), "position": [round(c, 3) for c in pos],
                          "z_axis": [round(c, 4) + 0.0 for c in z]})
         return rows
+
+    def to_top(self, path, point) -> list[float]:
+        """A point in a component's own coordinates (mm) → active assembly coordinates (mm).
+        path may reach into sub-assemblies ("Sub:1/Part:1")."""
+        m = self._occ(str(path)).Transformation
+        p = [float(c) for c in point]
+        return [round(sum(m.Cell(r, c) * p[c - 1] for c in (1, 2, 3)) + m.Cell(r, 4) * 10, 4) + 0.0
+                for r in (1, 2, 3)]
+
+    def to_local(self, path, point) -> list[float]:
+        """A point in active assembly coordinates (mm) → the component's own coordinates (mm)."""
+        m = self._occ(str(path)).Transformation
+        d = [float(point[r - 1]) - m.Cell(r, 4) * 10 for r in (1, 2, 3)]
+        return [round(sum(m.Cell(r, c) * d[r - 1] for r in (1, 2, 3)), 4) + 0.0 for c in (1, 2, 3)]
+
+    def replace_occurrence(self, path, with_file: str, all_same: bool = True,
+                           archive_old: bool = False) -> str:
+        """Put another file in a component's place — all occurrences of the same file at
+        that level (all_same), or only this one. Constraints are kept where Inventor can
+        match the geometry; the ones it lost and the components that moved are reported.
+        archive_old moves the old file into an "_old" folder beside it, once no open
+        document uses it any more."""
+        comp = self.active_assembly()
+        occ = self._occ(str(path))
+        name = self._path_of(occ)
+        new = os.path.abspath(with_file)
+        if not os.path.isfile(new):
+            raise RuntimeError(f"File not found: {new}")
+        old_doc = occ.Definition.Document
+        old = old_doc.FullFileName
+        if os.path.normcase(old) == os.path.normcase(new):
+            raise RuntimeError(f"{name} already is {os.path.basename(new)}")
+        if archive_old:
+            reason = self._library_reason(old_doc, self.library_folders())
+            if reason:
+                raise RuntimeError(f"{os.path.basename(old)} is not archived: {reason}. "
+                                   "Replace without archive_old.")
+        before = self._poses(comp)
+        sick_before = self._sick_constraints(comp)
+        n_cons = comp.Constraints.Count
+        try:
+            self._silently(lambda: occ.Replace(new, bool(all_same)))
+            self.active_document().Update()
+        except Exception as e:
+            blockers = self._open_parents(occ)
+            raise RuntimeError(f"{name} can't be replaced: {describe_com_error(e)}"
+                               + (f"\nOpen documents that reference this level block it: {', '.join(blockers)} — "
+                                  "close them (manage_documents) and retry." if blockers else "")) from None
+        after = self._poses(comp)
+        swapped = sum(1 for p in after if p not in before)
+        moved = self._moved(before, after, set())
+        sick = sorted(set(self._sick_constraints(comp)) - set(sick_before))
+        lost = n_cons - comp.Constraints.Count
+        out = [f"Replaced {name} ({os.path.basename(old)}) with {os.path.basename(new)}"
+               + (f" — {swapped} part occurrence(s) are new" if swapped else "")]
+        if lost > 0:
+            out.append(f"{lost} constraint(s) are gone — add them again (manage_constraints list)")
+        if sick:
+            out.append(f"Constraints that lost their geometry: {', '.join(sick[:20])}")
+        if moved:
+            out.append(f"MOVED — check these: {'; '.join(moved[:20])}")
+        if archive_old:
+            out.append(self._archive_file(old))
+        return "\n".join(out)
+
+    def _sick_constraints(self, comp) -> list[str]:
+        """Names of the constraints Inventor can't solve."""
+        cons = [comp.Constraints.Item(i) for i in range(1, comp.Constraints.Count + 1)]
+        return [c.Name for c in cons if unhealthy(self.app, c)]
+
+    def _archive_file(self, path: str) -> str:
+        """Move a file no open document uses into "_old" beside it (numbered if taken)."""
+        name = os.path.basename(path)
+        for d in self.app.Documents:
+            if os.path.normcase(d.FullFileName or "") != os.path.normcase(path):
+                continue
+            users = [r.DisplayName for r in d.ReferencingDocuments]
+            if users:
+                return (f"{name} stays where it is: still used by {', '.join(users[:10])} "
+                        "(replace it there too, or close them)")
+            if d.Dirty:
+                return f"{name} stays where it is: it has unsaved changes"
+            d.Close(True)
+            break
+        folder = os.path.join(os.path.dirname(path), "_old")
+        os.makedirs(folder, exist_ok=True)
+        stem, ext = os.path.splitext(name)
+        dest, n = os.path.join(folder, name), 1
+        while os.path.exists(dest):
+            n += 1
+            dest = os.path.join(folder, f"{stem} ({n}){ext}")
+        try:
+            os.replace(path, dest)
+        except OSError as e:
+            return f"{name} stays where it is: {e}"
+        return (f"Old file moved to {dest}. Assemblies that are not open and still reference "
+                f"{name} will ask for it — replace it there too.")
 
     def _dependents(self, comp, occ) -> dict:
         """What hangs on an occurrence: constraints, and component patterns it is the parent of."""

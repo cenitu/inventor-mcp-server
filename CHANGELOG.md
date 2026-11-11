@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `capture_view(look_from=[x, y, z], target=, up=, perspective=)`: a picture from a point you
+  name, for a model whose `front` is not Inventor's front, or a detail inside an assembly.
+  `zoom` gets closer in every view.
+- `manage_occurrences(action="replace", with_file=)`: another file in a component's place, all
+  occurrences of it at once. Says which constraints were lost and what moved; `archive_old` moves
+  the old file into `_old` beside it once no open document uses it.
+- `manage_occurrences(action="to_top" / "to_local", point=)`: a point in a component's own
+  coordinates ↔ assembly coordinates, at any depth. `inv.to_top` / `inv.to_local` in
+  `execute_python`.
+- The server imports numpy in the background when it starts, if it is installed: the first
+  import took 52 s inside `load_library`. `INVENTOR_MCP_PRELOAD` names other modules
+  (";"-separated; empty = none).
+
 - `shell`, `loft`, `sweep`: hollow a body leaving chosen faces open; blend between the profiles of
   two or more sketches; sweep a profile along a path sketch, with taper and twist. Each returns
   the volume / topology change.
