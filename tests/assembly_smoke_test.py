@@ -122,6 +122,52 @@ def assembly_tests(inv, run, plate, pin):
         return "ok"
     run.step("assembly_cut that misses leaves nothing", cut_that_misses)
 
+    def point_round_trip():
+        top = inv.to_top(2, [0, 0, 30])
+        back = inv.to_local(2, top)
+        origin = inv.assembly_info()["components"][1]["position_mm"]
+        if max(abs(a - b) for a, b in zip(back, [0, 0, 30])) > 1e-3:
+            _raise(f"to_local(to_top(p)) = {back}")
+        if max(abs(a - b) for a, b in zip(inv.to_top(2, [0, 0, 0]), origin)) > 1e-2:
+            _raise(f"to_top of the origin is not the component's position {origin}")
+        return f"pin tip at {top}"
+    run.step("to_top / to_local", point_round_trip)
+
+    def custom_view():
+        paths = inv.view_images(["custom", "top"], 320, 240, look_from=[200, 150, 300],
+                                target=[0, 0, 5], zoom=2, perspective=True)
+        sizes = [os.path.getsize(p) for p in paths]
+        for p in paths:
+            os.remove(p)
+        os.rmdir(os.path.dirname(paths[0]))
+        if len(sizes) != 2 or min(sizes) < 500:
+            _raise(f"pictures: {sizes}")
+        try:
+            inv.view_images(["custom"])
+        except ValueError:
+            return f"{sizes} bytes"
+        _raise("custom without look_from did not raise")
+    run.step("view from a point", custom_view)
+
+    def replace():
+        import shutil
+        pin2 = os.path.join(os.path.dirname(pin), "smoke_pin_b.ipt")
+        old = os.path.join(os.path.dirname(pin), "_old")
+        shutil.rmtree(old, ignore_errors=True)
+        shutil.copyfile(pin, pin2)
+        n = inv.active_assembly().Constraints.Count
+        out = inv.replace_occurrence(2, pin2, archive_old=True)
+        now = inv.active_assembly().Occurrences.Item(2).Definition.Document.FullFileName
+        if os.path.normcase(now) != os.path.normcase(pin2):
+            _raise(f"occurrence 2 is still {now}")
+        if inv.active_assembly().Constraints.Count != n or "gone" in out or "lost" in out:
+            _raise(out)
+        if not os.path.isfile(os.path.join(old, "smoke_pin.ipt")) or os.path.exists(pin):
+            _raise("the old file was not archived: " + out)
+        shutil.move(os.path.join(old, "smoke_pin.ipt"), pin)  # the next run builds it again
+        return out
+    run.step("replace_occurrence keeps the constraint, archives the old file", replace)
+
     run.step("ground pin", lambda: inv.ground_occurrence(2, True))
     run.step("unground pin", lambda: inv.ground_occurrence(2, False))
     run.step("delete_occurrence", lambda: inv.delete_occurrence(2, force=True))

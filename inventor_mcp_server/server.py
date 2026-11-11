@@ -786,7 +786,8 @@ def reload_api() -> str:
 @tool()
 def capture_view(views: str = "iso", width: int = 800, height: int = 600,
                  background: str = "inventor", fit_to: str = "", isolate: str = "",
-                 sketches: bool = False, up: str = "y"):
+                 sketches: bool = False, up: str = "y", look_from: list[float] | None = None,
+                 target: list[float] | None = None, zoom: float = 1, perspective: bool = False):
     """Look at the model: pictures of the active document, returned as images you can see.
     Use it to check your work — a flange on the wrong side, a door opening the wrong way,
     a part floating off the frame — which the numbers alone don't show.
@@ -802,9 +803,22 @@ def capture_view(views: str = "iso", width: int = 800, height: int = 600,
         sketches: Show sketches and work features too (hidden by default; restored after).
         up: "y" = Inventor's own view names (its default templates have Y up); "z" for a
             model built with Z up (frames, buildings): front looks along +Y, top down -Z.
+            With look_from: which axis is up in the picture, "x", "y" or "z".
+        look_from: Camera position [x, y, z] in mm, model coordinates — when a named view
+                   looks from the wrong side, or for a detail. This picture is the view
+                   "custom": it replaces the default "iso"; name it in `views` to mix
+                   ("custom,top").
+        target: With look_from: the point [x, y, z] in mm to look at and centre on — the
+                picture is then sized to fit_to (or the model); use zoom to get closer.
+                Empty = the middle of fit_to / the model, the whole of it in the picture.
+        zoom: 2 = twice as close, 0.5 = twice as far; every view.
+        perspective: With look_from: a perspective picture from that point, not parallel.
     """
     names = [v.strip().lower() for v in views.split(",") if v.strip()]
-    paths = inv.view_images(names, width, height, background.lower() == "white", fit_to, sketches, up, isolate)
+    if look_from is not None and "custom" not in names:
+        names = ["custom"] if names in ([], ["iso"]) else names + ["custom"]
+    paths = inv.view_images(names, width, height, background.lower() == "white", fit_to, sketches, up,
+                            isolate, look_from, target, zoom, perspective)
     images = []
     for path in paths:
         with open(path, "rb") as f:
@@ -1194,7 +1208,9 @@ def manage_constraints(action: str = "list", index: int = 0, value: float | None
 def manage_occurrences(action: str = "list", path: str = "", depth: int = 1,
                        definition: str = "", axis: list[float] | None = None,
                        near: list[float] | None = None, within: float = 0,
-                       grounded: bool = True, cascade: bool = False, force: bool = False) -> str:
+                       grounded: bool = True, cascade: bool = False, force: bool = False,
+                       with_file: str = "", all_same: bool = True, archive_old: bool = False,
+                       point: list[float] | None = None) -> str:
     """Components of the active assembly.
 
     "list": a table with positions; depth=2 also lists what is inside sub-assemblies, with paths.
@@ -1203,9 +1219,14 @@ def manage_occurrences(action: str = "list", path: str = "", depth: int = 1,
     "ground": fix a component in space (grounded=False releases it). Ground the first one.
     "delete": says first what depends on it (patterns, constraints) and stops; force=True
     deletes, cascade=True also deletes pattern members. Reports components that moved.
+    "replace": put with_file in the component's place — a rebuilt part saved under a new
+    name, a new revision. Constraints stay where Inventor can match the geometry; reports
+    the ones it lost and what moved.
+    "to_top" / "to_local": a point in the component's own coordinates → assembly
+    coordinates, and back — for a sub-assembly that was moved, or a part placed turned.
 
     Args:
-        action: "list", "find", "ground" or "delete".
+        action: "list", "find", "ground", "delete", "replace", "to_top" or "to_local".
         path: Component name, path ("Sub:1/Part:1") or list index.
         depth: For "list".
         definition: For "find": name pattern on the part / file name.
@@ -1215,6 +1236,12 @@ def manage_occurrences(action: str = "list", path: str = "", depth: int = 1,
         grounded: For "ground".
         cascade: For "delete".
         force: For "delete".
+        with_file: For "replace": full path of the .ipt / .iam that takes its place.
+        all_same: For "replace": every occurrence of the same file at that level (default),
+                  or only this one.
+        archive_old: For "replace": then move the old file into an "_old" folder beside it —
+                     only if no open document still uses it; never a library file.
+        point: For "to_top" / "to_local": [x, y, z] in mm.
     """
     a = action.lower()
     if a == "list":
@@ -1225,7 +1252,14 @@ def manage_occurrences(action: str = "list", path: str = "", depth: int = 1,
         return inv.ground_occurrence(path, grounded)
     if a == "delete":
         return inv.delete_occurrence(path, cascade, force)
-    return f"Unknown action '{action}': list, find, ground or delete."
+    if a == "replace":
+        return inv.replace_occurrence(path, with_file, all_same, archive_old)
+    if a in ("to_top", "to_local"):
+        if point is None or len(point) != 3:
+            return f"'{a}' needs point=[x, y, z] in mm."
+        out = (inv.to_top if a == "to_top" else inv.to_local)(path, point)
+        return f"{out} mm in {'the assembly' if a == 'to_top' else path}"
+    return f"Unknown action '{action}': list, find, ground, delete, replace, to_top or to_local."
 
 
 @tool()
@@ -2147,7 +2181,27 @@ def sweep_rotation(moving: str, axis_point: str, axis_dir: str,
     return json.dumps(rows, indent=1, ensure_ascii=False)
 
 
+def _preload():
+    """Import the heavy modules agents' libraries use while the server is idle. The first
+    `import numpy` of a process can take most of a minute (52 s measured in load_library);
+    done here, in the background, a library that imports it loads in seconds.
+    INVENTOR_MCP_PRELOAD: ";"-separated module names (default "numpy"; empty = none).
+    A module that is not installed is skipped."""
+    import importlib
+    names = [n.strip() for n in os.environ.get("INVENTOR_MCP_PRELOAD", "numpy").split(";") if n.strip()]
+
+    def run():
+        for name in names:
+            try:
+                importlib.import_module(name)
+            except Exception:
+                pass
+    if names:
+        threading.Thread(target=run, name="preload", daemon=True).start()
+
+
 def main():
+    _preload()
     mcp.run(transport="stdio")
 
 

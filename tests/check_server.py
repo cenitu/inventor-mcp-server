@@ -304,7 +304,7 @@ import base64, tempfile
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
-def fake_views(self, views, width, height, white, focus, sketches, up, isolate):
+def fake_views(self, views, *args):
     folder = tempfile.mkdtemp()
     paths = [os.path.join(folder, f"{v}.png") for v in views]
     for p in paths:
@@ -319,6 +319,14 @@ srv._api.InventorConnection.view_images = real_views
 blocks = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
 kinds = [getattr(b, "type", None) for b in blocks]
 check("capture_view reaches the client as images", kinds == ["image", "image"], str(kinds))
+
+seen = []
+srv._api.InventorConnection.view_images = lambda self, views, *a: seen.append(list(views)) or fake_views(self, views)
+asyncio.run(pkg.mcp.call_tool("capture_view", {"look_from": [100, 100, 100]}))
+asyncio.run(pkg.mcp.call_tool("capture_view", {"views": "top", "look_from": [100, 100, 100]}))
+srv._api.InventorConnection.view_images = real_views
+check("capture_view(look_from) takes the custom view, alone or beside the named ones",
+      seen == [["custom"], ["top", "custom"]], str(seen))
 
 os.environ["INVENTOR_MCP_PROTECTED"] = r"C:\vendor\*;D:\orig"
 reason = api_paths = importlib.import_module("inventor_mcp_server.inventor_api").InventorConnection._path_reason
