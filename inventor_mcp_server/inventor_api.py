@@ -180,6 +180,116 @@ def health_name(app, value) -> str:
     return (typelib_enum(app, "HealthStatusEnum") or HEALTH_FALLBACK).get(value) or str(value)
 
 
+# ---------- Flat pattern checks (plain 2D geometry, mm — no Inventor needed) ----------
+
+def _seg_point_dist(p, a, b) -> float:
+    ax, ay, bx, by = a[0], a[1], b[0], b[1]
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L < 1e-18 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L))
+    return math.hypot(p[0] - ax - t * dx, p[1] - ay - t * dy)
+
+
+def _segs_cross(a, b, c, d) -> bool:
+    def side(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    return side(a, b, c) * side(a, b, d) < 0 and side(c, d, a) * side(c, d, b) < 0
+
+
+def _seg_seg_dist(a, b, c, d) -> float:
+    if _segs_cross(a, b, c, d):
+        return 0.0
+    return min(_seg_point_dist(a, c, d), _seg_point_dist(b, c, d),
+               _seg_point_dist(c, a, b), _seg_point_dist(d, a, b))
+
+
+def _ray_hit(p, n, segments) -> float:
+    """Distance from p along the unit direction n to the nearest of the segments (inf: none)."""
+    best = math.inf
+    for a, b in segments:
+        ex, ey = b[0] - a[0], b[1] - a[1]
+        den = n[0] * ey - n[1] * ex
+        if abs(den) < 1e-12:
+            continue
+        wx, wy = a[0] - p[0], a[1] - p[1]
+        t = (wx * ey - wy * ex) / den
+        u = (wx * n[1] - wy * n[0]) / den
+        if t > 1e-6 and -1e-9 <= u <= 1 + 1e-9:
+            best = min(best, t)
+    return best
+
+
+def _segments(polyline) -> list:
+    return list(zip(polyline, polyline[1:]))
+
+
+def flat_pattern_problems(outer: list, holes: list, bends: list, thickness: float, v_die: float,
+                          min_flange: float = 0, min_hole_to_bend: float = 0) -> dict:
+    """What a press brake can't do with this flat pattern.
+
+    outer: the contour, a list of polylines [(x, y), …] (one per edge); holes: [{"points":
+    polyline, "diameter": mm or None}]; bends: [{"a": (x, y), "b": (x, y), "radius": mm, …}]
+    — the bend centre lines. All in mm.
+
+    The sheet lies across a V die while it is bent, so on both sides of the bend line it has
+    to reach past the die's shoulder: at least V/2 + thickness of flat sheet (min_flange),
+    measured in the flat pattern from the bend line to the edge of the part or to the next
+    bend. A hole closer to the bend line than V/2 (or radius + 2 x thickness, if that is
+    more — min_hole_to_bend) is over the opening and gets pulled out of shape.
+    """
+    limit = min_flange or v_die / 2 + thickness
+    contour = [s for pl in outer for s in _segments(pl)]
+    problems, legs = [], []
+    for i, b in enumerate(bends, 1):
+        a, c = b["a"], b["b"]
+        length = math.dist(a, c)
+        if length < 1e-9:
+            continue
+        ux, uy = (c[0] - a[0]) / length, (c[1] - a[1]) / length
+        others = [(o["a"], o["b"]) for j, o in enumerate(bends, 1) if j != i]
+        sides = []
+        for n in ((-uy, ux), (uy, -ux)):
+            reach, to_bend = 0.0, False
+            for f in (0.1, 0.3, 0.5, 0.7, 0.9):
+                p = (a[0] + ux * length * f, a[1] + uy * length * f)
+                edge, bend = _ray_hit(p, n, contour), _ray_hit(p, n, others)
+                d = min(edge, bend)
+                if d != math.inf and d > reach:
+                    reach, to_bend = d, bend < edge
+            sides.append((reach, to_bend))
+        legs.append({"bend": i, "length_mm": round(length, 2),
+                     "legs_mm": [round(s[0], 2) for s in sides],
+                     "to": ["next bend" if s[1] else "edge" for s in sides]})
+        for reach, to_bend in sides:
+            if reach < limit - 1e-6:
+                problems.append(
+                    f"Bend {i}: only {reach:.1f} mm of sheet to the {'next bend' if to_bend else 'edge'} — "
+                    f"needs {limit:.1f} mm to reach across a V{v_die:g} die")
+        hole_limit = min_hole_to_bend or max(v_die / 2, b.get("radius", 0) + 2 * thickness)
+        for k, h in enumerate(holes, 1):
+            d = min(_seg_seg_dist(p, q, a, c) for p, q in _segments(h["points"]))
+            what = f"Ø{h['diameter']:g} hole" if h.get("diameter") else "cut-out"
+            if d == 0:
+                problems.append(f"Bend {i}: {what} {k} lies across the bend line — fine as a relief "
+                                "window, otherwise move it")
+            elif d < hole_limit - 1e-6:
+                problems.append(f"Bend {i}: {what} {k} is {d:.1f} mm from the bend line — closer than "
+                                f"{hole_limit:.1f} mm it is pulled out of shape; move it or cut it after bending")
+    for k, h in enumerate(holes, 1):
+        if h.get("diameter") and h["diameter"] < thickness - 1e-6:
+            problems.append(f"Ø{h['diameter']:g} hole {k} is smaller than the {thickness:g} mm sheet — "
+                            "too small to punch, and a laser leaves it rough")
+    return {"min_flange_mm": round(limit, 2), "bends": legs, "problems": problems}
+
+
+def rule_from_name(name: str):
+    """(thickness mm, V die mm) from a shop rule named TXX-VYY (T15-V10 = 1.5 mm on a V10 die)."""
+    import re
+    m = re.fullmatch(r"\s*T(\d+)\s*-\s*V(\d+)\s*", name or "", re.I)
+    return (int(m.group(1)) / 10, float(m.group(2))) if m else None
+
+
+
 def unhealthy(app, obj) -> str:
     """The health of a feature / constraint when it is not fine (up to date or
     suppressed), else ''."""
@@ -3321,12 +3431,22 @@ class InventorConnection:
     # decides what Inventor calls them.
     _SPOTS = {"top": (0.25, 0.30), "right": (0.58, 0.66), "iso": (0.85, 0.66)}
 
+    # Where a section view goes, by the direction of its cutting line: the place of the
+    # projected view it would otherwise hide.
+    _SECTION_SPOTS = {"vertical": "right", "horizontal": "top"}
+    _DETAIL_SPOT = (0.58, 0.36)
+
     def make_drawing(self, pdf_path: str, views: str = "front,top,right,iso",
                      template: str = "ISO", scale: float = 0, flat: bool = False,
-                     drawing_path: str = "") -> str:
+                     drawing_path: str = "", parts_list: bool = False, balloons: bool = False,
+                     section: str = "", detail=None, bend_notes: bool = True) -> str:
         """2D drawing of the active (saved) part or assembly: a base view, projected views,
         overall dimensions on the base view and the model dimensions Inventor can retrieve,
-        exported to PDF. flat=True draws a sheet metal part's flat pattern (one view)."""
+        exported to PDF. flat=True draws a sheet metal part's flat pattern (one view), with a
+        note on every bend line and a table of the bends (bend_notes).
+        parts_list / balloons: assemblies — the list above the title block, a balloon per
+        first-level component. section: "vertical" or "horizontal" cut through the base
+        view, optionally ":<mm>" off its middle. detail: [x, y, z, radius] in model mm."""
         model = self.active_document()
         if not model.FullFileName:
             raise RuntimeError("Save the model first — a drawing references the file.")
@@ -3343,6 +3463,22 @@ class InventorConnection:
         unknown = [n for n in extra if n not in self._SPOTS]
         if unknown:
             raise ValueError(f"Projected views can be {', '.join(self._SPOTS)} — not {', '.join(unknown)}")
+        is_assembly = model.DocumentType == kAssemblyDocumentObject
+        if (parts_list or balloons) and not is_assembly:
+            raise ValueError("parts_list and balloons are for an assembly")
+        if flat and (section or detail is not None):
+            raise ValueError("section and detail are for the folded model — not with flat=True")
+        cut_kind, cut_offset = "", 0.0
+        if section:
+            cut_kind, _, off = section.strip().lower().partition(":")
+            if cut_kind not in self._SECTION_SPOTS:
+                raise ValueError('section is "vertical" or "horizontal", optionally ":<mm>" off the middle')
+            cut_offset = float(off) if off.strip() else 0.0
+            if self._SECTION_SPOTS[cut_kind] in extra:
+                raise ValueError(f"A {cut_kind} section goes where the '{self._SECTION_SPOTS[cut_kind]}' view "
+                                 "is — leave that view out of `views`")
+        if detail is not None and (len(detail) != 4 or float(detail[3]) <= 0):
+            raise ValueError("detail is [x, y, z, radius] in model mm")
         comp = model.ComponentDefinition
         if flat:
             if not getattr(comp, "HasFlatPattern", False):
@@ -3374,6 +3510,22 @@ class InventorConnection:
                 else:
                     sheet.DrawingViews.AddProjectedView(base, pt(*self._SPOTS[name]), 32258)
                 placed.append(name)
+            notes = []  # what was added besides the views, and what could not be
+            by_name = {placed[0]: base}
+            for i, name in enumerate(extra):
+                by_name[name] = sheet.DrawingViews.Item(i + 2)
+            if cut_kind:
+                self._annotate(notes, "section", lambda: self._section_view(
+                    sheet, base, cut_kind, cut_offset, scale, pt(*self._SPOTS[self._SECTION_SPOTS[cut_kind]])))
+            if detail is not None:
+                self._annotate(notes, "detail", lambda: self._detail_view(
+                    sheet, base, detail, scale, pt(*self._DETAIL_SPOT)))
+            if parts_list:
+                self._annotate(notes, "parts list", lambda: self._parts_list(sheet, base))
+            if balloons:
+                self._annotate(notes, "balloons", lambda: self._balloons(sheet, by_name.get("iso", base), comp))
+            if flat and bend_notes:
+                self._annotate(notes, "bends", lambda: self._bend_notes(sheet, base))
             overall = self._overall_dimensions(sheet, base)
             retrieved = 0
             try:
@@ -3394,11 +3546,189 @@ class InventorConnection:
             return (f"Drawing of {model.DisplayName}: {', '.join(placed)}, scale {ratio}, "
                     f"overall {' x '.join(overall) or '-'} mm, {retrieved} retrieved dimension(s), "
                     f"sheet {sheet.Width * 10:.0f}x{sheet.Height * 10:.0f} mm"
-                    f"\nPDF: {pdf_path} ({os.path.getsize(pdf_path) // 1024} KB)"
+                    + "".join(f"\n{n}" for n in notes)
+                    + f"\nPDF: {pdf_path} ({os.path.getsize(pdf_path) // 1024} KB)"
                     + (f"\nDrawing: {drawing_path}" if drawing_path else ""))
         finally:
             if not drawing_path:
                 drawing.Close(True)
+
+    @staticmethod
+    def _annotate(notes: list, what: str, fn):
+        """Run one annotation step; the drawing is still worth having if it fails."""
+        try:
+            notes.append(fn())
+        except Exception as e:
+            notes.append(f"{what}: FAILED — {describe_com_error(e)}")
+
+    def _section_view(self, sheet, base, kind: str, offset_mm: float, scale: float, position) -> str:
+        """A full section of the base view along a vertical / horizontal line through its
+        middle (offset_mm in model mm, to the right / up)."""
+        tg = self._tg()
+        off = offset_mm / 10 * scale
+        cx, cy = base.Center.X, base.Center.Y
+        w, h = base.Width / 2 + 0.8, base.Height / 2 + 0.8
+        ends = (((cx + off, cy + h), (cx + off, cy - h)) if kind == "vertical"
+                else ((cx - w, cy + off), (cx + w, cy + off)))
+        sketch = base.Sketches.Add()
+        sketch.Edit()
+        try:
+            a, b = (sketch.SheetToSketchSpace(tg.CreatePoint2d(*e)) for e in ends)
+            sketch.SketchLines.AddByTwoPoints(a, b)
+        finally:
+            sketch.ExitEdit()
+        view = sheet.DrawingViews.AddSectionView(base, sketch, position, 32258, scale, True, "A")
+        return f"section A-A ({kind}" + (f", {offset_mm:g} mm off the middle" if offset_mm else "") + f"): {view.Name}"
+
+    def _detail_view(self, sheet, base, detail, scale: float, position) -> str:
+        """A circular detail of the base view around a model point, at the next larger scale."""
+        x, y, z, r = (float(v) for v in detail)
+        center = base.ModelToSheetSpace(self._tg().CreatePoint(x / 10, y / 10, z / 10))
+        bigger = min((s for s in self._SCALES if s >= scale * 2), default=scale * 2)
+        view = sheet.DrawingViews.AddDetailView(base, position, 32258, True, center, r / 10 * scale,
+                                                None, bigger, True, "B")
+        ratio = f"{bigger:g}:1" if bigger >= 1 else f"1:{1 / bigger:g}"
+        return f"detail B (R{r:g} mm at {x:g}, {y:g}, {z:g}), scale {ratio}: {view.Name}"
+
+    @staticmethod
+    def _boxes_overlap(a, b) -> bool:
+        return not (a.MaxPoint.X <= b.MinPoint.X or b.MaxPoint.X <= a.MinPoint.X
+                    or a.MaxPoint.Y <= b.MinPoint.Y or b.MaxPoint.Y <= a.MinPoint.Y)
+
+    def _seat_table(self, sheet, table):
+        """Move a table so that it sits on the title block, right edges in line (or into the
+        border's top right corner when the sheet has no title block)."""
+        box = table.RangeBox
+        try:
+            tb = sheet.TitleBlock.RangeBox
+            dx, dy = tb.MaxPoint.X - box.MaxPoint.X, tb.MaxPoint.Y - box.MinPoint.Y
+        except Exception:
+            try:
+                corner = sheet.Border.RangeBox.MaxPoint
+                dx, dy = corner.X - box.MaxPoint.X, corner.Y - box.MaxPoint.Y
+            except Exception:
+                return
+        pos = table.Position
+        table.Position = self._tg().CreatePoint2d(pos.X + dx, pos.Y + dy)
+
+    def _table_clash(self, sheet, table) -> str:
+        box = table.RangeBox
+        hit = [v.Name for v in (sheet.DrawingViews.Item(i) for i in range(1, sheet.DrawingViews.Count + 1))
+               if box.MaxPoint.X > v.Left and box.MinPoint.X < v.Left + v.Width
+               and box.MaxPoint.Y > v.Top - v.Height and box.MinPoint.Y < v.Top]
+        return f" — it COVERS {', '.join(hit)}: fewer views, or a smaller scale" if hit else ""
+
+    def _parts_list(self, sheet, base) -> str:
+        """The assembly's first-level parts list, seated on the title block."""
+        table = sheet.PartsLists.Add(base, self._tg().CreatePoint2d(sheet.Width * 0.9, sheet.Height * 0.9),
+                                     46593)  # kStructured: first-level components
+        self._seat_table(sheet, table)
+        return f"parts list: {table.PartsListRows.Count} row(s)" + self._table_clash(sheet, table)
+
+    def _balloons(self, sheet, view, comp) -> str:
+        """A balloon per first-level component (one for each file), pointing at one of its
+        edges in the view, set on a ring around the view."""
+        tg = self._tg()
+        cx, cy = view.Center.X, view.Center.Y
+        ring = math.hypot(view.Width, view.Height) / 2 + 1.0
+        # The outermost edge of each first-level component in the view. (DrawingCurves(occ)
+        # is a type mismatch late-bound, so every curve is asked whose edge it is.)
+        outermost = {}
+        for j in range(1, view.DrawingCurves.Count + 1):
+            c = view.DrawingCurves.Item(j)
+            try:
+                owner = c.ModelGeometry.ContainingOccurrence
+                name = self._path_of(owner).split("/")[0]
+                m, how = c.MidPoint, 57859            # kMidPointIntent
+                if m is None:                          # a full circle has no middle
+                    m, how = c.CenterPoint, 57863      # kCircularTopPointIntent
+            except Exception:
+                continue
+            if m is None:
+                continue
+            d = math.hypot(m.X - cx, m.Y - cy)
+            if name not in outermost or d > outermost[name][0]:
+                outermost[name] = (d, c, m, how)
+        targets, seen, hidden = [], set(), []
+        for i in range(1, comp.Occurrences.Count + 1):
+            occ = comp.Occurrences.Item(i)
+            key = occ.Definition.Document.InternalName
+            if key in seen:
+                continue
+            best = outermost.get(occ.Name)
+            if best is None:
+                continue
+            seen.add(key)
+            targets.append((math.atan2(best[2].Y - cy, best[2].X - cx), best[1], occ.Name, best[3]))
+        for i in range(1, comp.Occurrences.Count + 1):
+            occ = comp.Occurrences.Item(i)
+            if occ.Definition.Document.InternalName not in seen and occ.Name not in hidden:
+                hidden.append(occ.Name)
+        targets.sort(key=lambda t: t[0])
+        gap = 1.4 / ring  # balloons this far apart on the ring don't touch
+        placed, failed, last = 0, [], None
+        for angle, curve, name, how in targets:
+            if last is not None and angle - last < gap:
+                angle = last + gap
+            last = angle
+            try:
+                points = self.app.TransientObjects.CreateObjectCollection()
+                points.Add(tg.CreatePoint2d(cx + ring * math.cos(angle), cy + ring * math.sin(angle)))
+                try:
+                    intent = sheet.CreateGeometryIntent(curve, how)
+                except Exception:
+                    intent = sheet.CreateGeometryIntent(curve)
+                points.Add(intent)
+                sheet.Balloons.Add(points)
+                placed += 1
+            except Exception as e:
+                failed.append(f"{name} ({describe_com_error(e)})")
+        return (f"balloons: {placed} on {view.Name}"
+                + (f"; not visible in that view: {', '.join(hidden[:15])}" if hidden else "")
+                + (f"; FAILED: {'; '.join(failed[:8])}" if failed else ""))
+
+    def _bend_notes(self, sheet, view) -> str:
+        """A bend note (direction, angle, radius) on every bend line of a flat pattern view,
+        and a table that counts the bends of each kind — what the press brake needs set up."""
+        notes = sheet.DrawingNotes.BendNotes
+        texts, failed = [], 0
+        for i in range(1, view.DrawingCurves.Count + 1):
+            c = view.DrawingCurves.Item(i)
+            try:
+                if c.EdgeType not in (82690, 82691):  # kBendUpEdge, kBendDownEdge
+                    continue
+            except Exception:
+                continue
+            try:
+                texts.append(" ".join(notes.Add(c).Text.split()))
+            except Exception:
+                failed += 1
+        if not texts and not failed:
+            return "bends: none in this part"
+        kinds = {}
+        for t in texts:
+            kinds[t] = kinds.get(t, 0) + 1
+        rows = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+        out = f"bends: {len(texts)} noted — " + ", ".join(f"{n} x {t}" for t, n in rows)
+        if failed:
+            out += f"; {failed} bend line(s) got no note"
+        try:
+            # Late-bound, the two string arrays go as arrays of variants, which Add refuses
+            # (E_INVALIDARG) — so the call is made with its argument types spelled out.
+            tables = sheet.CustomTables
+            strings = pythoncom.VT_ARRAY | pythoncom.VT_BSTR
+            cells = [v for t, n in rows for v in (str(n), t)]
+            table = win32com.client.Dispatch(tables._oleobj_.InvokeTypes(
+                tables._oleobj_.GetIDsOfNames("Add"), 0, pythoncom.DISPATCH_METHOD, (pythoncom.VT_DISPATCH, 0),
+                ((pythoncom.VT_BSTR, 1), (pythoncom.VT_DISPATCH, 1), (pythoncom.VT_I4, 1), (pythoncom.VT_I4, 1),
+                 (strings, 1), (strings, 1), (pythoncom.VT_ARRAY | pythoncom.VT_R8, 1)),
+                "BENDS", self._tg().CreatePoint2d(sheet.Width * 0.9, sheet.Height * 0.9),
+                2, len(rows), ["QTY", "BEND"], cells, [1.2, 4.8]))  # column widths, cm
+            self._seat_table(sheet, table)
+            out += self._table_clash(sheet, table)
+        except Exception as e:
+            out += f"; bend table FAILED — {describe_com_error(e)}"
+        return out
 
     def _overall_dimensions(self, sheet, view) -> list[str]:
         """Overall width and height on a view: between its outermost vertical lines and its
@@ -3458,6 +3788,154 @@ class InventorConnection:
         self._silently(lambda: addin.SaveCopyAs(drawing, context, options, medium))
         if not os.path.exists(path):
             raise RuntimeError(f"PDF export wrote no file: {path}")
+
+    # ---------- Can it be made? ----------
+
+    _SHEETS = ((2000, 1000), (2500, 1250), (3000, 1500))
+
+    def _strokes(self, edge) -> list:
+        """An edge as a polyline of (x, y) in mm (flat pattern edges lie in one plane)."""
+        ev = edge.Evaluator
+        lo, hi = ev.GetParamExtents()
+        got = ev.GetStrokes(lo, hi, 0.002)
+        coords = next(v for v in got if isinstance(v, (tuple, list)))
+        return [(coords[i] * 10, coords[i + 1] * 10) for i in range(0, len(coords) - 2, 3)]
+
+    def _flat_geometry(self, comp) -> tuple:
+        """Contour, holes and bend lines of the flat pattern (mm), for flat_pattern_problems."""
+        fp = comp.FlatPattern
+        top = fp.TopFace
+        outer, holes = [], []
+        for i in range(1, top.EdgeLoops.Count + 1):
+            loop = top.EdgeLoops.Item(i)
+            lines = [self._strokes(loop.Edges.Item(j)) for j in range(1, loop.Edges.Count + 1)]
+            if loop.IsOuterEdgeLoop:
+                outer += lines
+                continue
+            diameter = None
+            if loop.Edges.Count == 1 and loop.Edges.Item(1).GeometryType == 5124:  # kCircleCurve
+                diameter = round(loop.Edges.Item(1).Geometry.Radius * 20, 3)
+            holes.append({"points": [p for line in lines for p in line], "diameter": diameter})
+        bends, skipped = [], 0
+        results = fp.FlatBendResults
+        for i in range(1, results.Count + 1):
+            r = results.Item(i)
+            try:
+                if r.IsOnBottomFace:  # every bend is listed twice: top and bottom face
+                    continue
+            except Exception:
+                pass
+            try:
+                e = r.Edge
+                a, b = e.StartVertex.Point, e.StopVertex.Point
+                bends.append({"a": (a.X * 10, a.Y * 10), "b": (b.X * 10, b.Y * 10),
+                              "radius": round(r.InnerRadius * 10, 3),
+                              "angle": round(math.degrees(r.Angle), 2), "up": bool(r.IsDirectionUp)})
+            except Exception:
+                skipped += 1  # a rolled bend has no straight centre line
+        return outer, holes, bends, skipped
+
+    def check_sheet_metal_part(self, v_die: float = 0, min_flange: float = 0, min_hole_to_bend: float = 0,
+                               sheet: str = "", brake_length: float = 0) -> dict:
+        """Can the active sheet metal part be cut and bent? Rule, flat size against the
+        sheet, flange lengths and holes against the V die."""
+        doc = self.active_document()
+        comp = doc.ComponentDefinition
+        if not hasattr(comp, "HasFlatPattern"):
+            raise RuntimeError(f"{doc.DisplayName} is not a sheet metal part.")
+        problems, notes = [], []
+        t = round(comp.Thickness.Value * 10, 3)
+        rule = comp.ActiveSheetMetalStyle.Name
+        named = rule_from_name(rule)
+        if named:
+            if abs(named[0] - t) > 1e-3:
+                problems.append(f"Rule {rule} is for {named[0]:g} mm sheet but the part is {t:g} mm — "
+                                "activate the rule for this thickness instead of overriding the thickness")
+            die = v_die or named[1]
+        else:
+            die = v_die or 8 * t
+            notes.append(f"Rule '{rule}' is not a TXX-VYY shop rule" + (
+                "" if v_die else f"; a V{die:g} die (8 x thickness) is assumed — pass v_die for the real one"))
+        try:
+            self.flat_pattern()
+        except Exception as e:
+            return {"part": doc.DisplayName, "rule": rule, "thickness_mm": t,
+                    "problems": problems + [f"No flat pattern: {describe_com_error(e)} — the part can't be "
+                                            "unfolded as modelled"], "notes": notes}
+        fp = comp.FlatPattern
+        flat = sorted((round(fp.Length * 10, 2), round(fp.Width * 10, 2)), reverse=True)
+        outer, holes, bends, skipped = self._flat_geometry(comp)
+        if skipped:
+            notes.append(f"{skipped} bend(s) without a straight bend line were not checked")
+        for b in bends:
+            if named and abs(b["radius"] - die / 6) > 0.05 and abs(b["angle"] - 90) < 45:
+                notes.append(f"A {b['angle']:g}° bend has R{b['radius']:g}; a V{die:g} die gives about "
+                             f"R{die / 6:.2f} (V/6)")
+                break
+        found = flat_pattern_problems(outer, holes, bends, t, die, min_flange, min_hole_to_bend)
+        problems += found["problems"]
+        if sheet:
+            size = sorted((float(v) for v in sheet.lower().replace(" ", "").split("x")), reverse=True)
+            if flat[0] > size[0] or flat[1] > size[1]:
+                problems.append(f"Flat pattern {flat[0]:g} x {flat[1]:g} mm does not fit a "
+                                f"{size[0]:g} x {size[1]:g} mm sheet")
+            fits = f"{size[0]:g} x {size[1]:g}"
+        else:
+            fits = next((f"{a} x {b}" for a, b in self._SHEETS if flat[0] <= a and flat[1] <= b), None)
+            if fits is None:
+                problems.append(f"Flat pattern {flat[0]:g} x {flat[1]:g} mm is larger than a 3000 x 1500 sheet")
+        longest = max((b["length_mm"] for b in found["bends"]), default=0)
+        if brake_length and longest > brake_length:
+            problems.append(f"The longest bend is {longest:g} mm — more than the {brake_length:g} mm press brake")
+        return {"part": doc.DisplayName, "rule": rule, "thickness_mm": t, "v_die_mm": die,
+                "flat_mm": flat, "smallest_sheet_mm": fits, "holes": len(holes),
+                "min_flange_mm": found["min_flange_mm"], "bends": [
+                    {**leg, "angle": b["angle"], "radius_mm": b["radius"], "direction": "up" if b["up"] else "down"}
+                    for leg, b in zip(found["bends"], bends)],
+                "problems": problems, "notes": notes}
+
+    def check_clearances(self, clearance: float = 0.3, parts: list[str] | None = None,
+                         max_pairs: int = 600) -> dict:
+        """Parts of the active assembly that are closer than `clearance` mm without touching
+        — no room for the powder coat. Touching parts (clamped, screwed) are fine; fasteners
+        are left out. parts: name patterns to look at (default: every part)."""
+        comp = self.active_assembly()
+        if parts:
+            occs = self._occ_set(parts)
+        else:
+            leaves = comp.Occurrences.AllLeafOccurrences
+            occs = [leaves.Item(i) for i in range(1, leaves.Count + 1)]
+        occs = [o for o in occs if not self._is_fastener(o)]
+        pad = clearance / 10
+        boxes = []
+        for o in occs:
+            rb = o.RangeBox
+            boxes.append((rb.MinPoint.X - pad, rb.MinPoint.Y - pad, rb.MinPoint.Z - pad,
+                          rb.MaxPoint.X + pad, rb.MaxPoint.Y + pad, rb.MaxPoint.Z + pad))
+        pairs = [(i, j) for i in range(len(occs)) for j in range(i + 1, len(occs))
+                 if all(boxes[i][k] <= boxes[j][k + 3] and boxes[j][k] <= boxes[i][k + 3] for k in range(3))]
+        tight, touching, failed = [], 0, 0
+        measure = self.app.MeasureTools
+        for i, j in pairs[:max_pairs]:
+            try:
+                d = measure.GetMinimumDistance(occs[i], occs[j])
+                d = (d[0] if isinstance(d, (tuple, list)) else d) * 10
+            except Exception:
+                failed += 1
+                continue
+            if d < 0.005:
+                touching += 1
+            elif d < clearance - 1e-6:
+                tight.append({"a": self._path_of(occs[i]), "b": self._path_of(occs[j]), "gap_mm": round(d, 3)})
+        tight.sort(key=lambda r: r["gap_mm"])
+        notes = []
+        if len(pairs) > max_pairs:
+            notes.append(f"{len(pairs) - max_pairs} neighbouring pair(s) were not measured — "
+                         "narrow it down with `parts`")
+        if failed:
+            notes.append(f"{failed} pair(s) could not be measured")
+        return {"clearance_mm": clearance, "parts": len(occs), "pairs_measured": min(len(pairs), max_pairs),
+                "touching": touching, "too_close": tight, "notes": notes}
 
     # ---------- Surfaces to a solid ----------
     #

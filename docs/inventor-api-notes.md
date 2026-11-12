@@ -597,6 +597,37 @@ Out-parameters come back as a tuple under pywin32 dynamic dispatch:
   faces (planar and cylindrical ones are tight). Don't use it for exact sizes; measure
   with `MeasureTools` or evaluate the surface.
 
+## Flat pattern geometry
+
+- **`FlatPattern.FlatBendResults` lists every bend twice** — once for the top face and
+  once for the bottom (`IsOnBottomFace`). Count and measure the top ones.
+- The bend centre line is `FlatBendResult.Edge` (start / stop vertex, cm); the contour
+  and the holes are the outer and inner `EdgeLoops` of `FlatPattern.TopFace`. A hole is
+  an inner loop with one edge of `GeometryType` kCircleCurve (5124).
+
+## Drawings
+
+- **`DrawingView.DrawingCurves(occurrence)` is a type mismatch late-bound**
+  (DISP_E_TYPEMISMATCH). Walk `view.DrawingCurves` and ask each curve whose it is:
+  `curve.ModelGeometry.ContainingOccurrence`.
+- **`DrawingCurve.MidPoint` is `None` for a full circle** — use `CenterPoint` and a
+  `kCircularTopPointIntent` (57863) intent; lines and arcs take `kMidPointIntent` (57859).
+- **`CustomTables.Add` refuses Python lists** (E_INVALIDARG): late-bound they arrive as
+  arrays of variants, and `win32com.client.VARIANT(VT_ARRAY | VT_BSTR, …)` raises a
+  TypeError here. Spell the types out:
+  `tables._oleobj_.InvokeTypes(dispid, 0, DISPATCH_METHOD, (VT_DISPATCH, 0), ((VT_BSTR, 1),
+  (VT_DISPATCH, 1), (VT_I4, 1), (VT_I4, 1), (VT_ARRAY | VT_BSTR, 1), (VT_ARRAY | VT_BSTR, 1),
+  (VT_ARRAY | VT_R8, 1)), title, point, columns, rows, titles, cells, widths_cm)`.
+- **There is no bend table in the API** — `sheet.DrawingNotes.BendNotes.Add(curve)` on
+  the curves whose `EdgeType` is kBendUpEdge (82690) / kBendDownEdge (82691), and a custom
+  table built from the notes' `Text`.
+- `AddSectionView(parent, sketch, position, style, scale, show_label, name)` takes a
+  `DrawingSketch` made with `parent.Sketches.Add()`; its line is drawn in sketch space
+  (`sketch.SheetToSketchSpace(point)`) between `Edit()` and `ExitEdit()`.
+- `PartsListLevelEnum`: kStructured = kFirstLevelComponents = 46593, kPartsOnly = 46594,
+  kStructuredAllLevels = 46595. A table's `Position` can be moved after it is placed;
+  `RangeBox` then tells where it ended up.
+
 ## Topology pitfalls
 
 - **Edge/face indices renumber after every feature.** Re-find by midpoint /

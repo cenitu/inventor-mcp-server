@@ -2049,11 +2049,16 @@ def convert_surfaces_to_solid(work_surfaces: str = "all", tolerance: float = 0.0
 
 @tool()
 def create_drawing(pdf_path: str, views: str = "front,top,right,iso", template: str = "ISO",
-                 scale: float = 0, flat: bool = False, drawing_path: str = "") -> str:
+                 scale: float = 0, flat: bool = False, drawing_path: str = "",
+                 parts_list: bool = False, balloons: bool = False, section: str = "",
+                 detail: list[float] | None = None, bend_notes: bool = True) -> str:
     """2D drawing of the active part or assembly (saved to disk) → PDF for the shop floor.
     A base view, projected views around it, overall dimensions on the base view (between
     its outermost straight edges — check them on assemblies), the model dimensions
     Inventor can retrieve, and the template's title block (filled from properties()).
+    Assemblies: a parts list and balloons. Any model: a section and a detail view.
+    Flat patterns: direction, angle and radius on every bend line, and a table of the bends.
+    An annotation that fails is named in the answer; the rest of the drawing is still made.
     Read the PDF back to check the layout.
 
     Args:
@@ -2064,8 +2069,20 @@ def create_drawing(pdf_path: str, views: str = "front,top,right,iso", template: 
         scale: 0 = largest standard scale that fits; or e.g. 0.2 for 1:5.
         flat: Sheet metal part: draw the flat pattern (one view).
         drawing_path: Also keep the drawing as .idw / .dwg (otherwise it is closed).
+        parts_list: Assembly: the parts list (first-level components: item, quantity, part
+                    number, description — fill those with edit_properties) on the title block.
+        balloons: Assembly: an item balloon for each different first-level component, on
+                  the iso view if there is one, else on the base view.
+        section: "vertical" or "horizontal": a full section A-A through the middle of the
+                 base view; "vertical:12.5" cuts 12.5 mm (model) right of the middle,
+                 "horizontal:-8" 8 mm below it. A vertical section takes the place of the
+                 "right" view and a horizontal one of "top" — leave that view out of `views`.
+        detail: [x, y, z, radius] in model mm: an enlarged detail B of the base view around
+                that point (a small hole pattern, a corner relief).
+        bend_notes: With flat: the bend notes and the bend table (default on).
     """
-    return inv.make_drawing(pdf_path, views, template, scale, flat, drawing_path)
+    return inv.make_drawing(pdf_path, views, template, scale, flat, drawing_path,
+                            parts_list, balloons, section, detail, bend_notes)
 
 
 @tool()
@@ -2148,6 +2165,38 @@ def check_interference(set_a: str, set_b: str = "", ignore_fasteners: bool = Fal
     shown = [h for h in hits if not h.get("fastener")]
     note = f"\n({len(hits) - len(shown)} overlap(s) with fasteners set aside)" if len(hits) != len(shown) else ""
     return (json.dumps(shown, indent=1, ensure_ascii=False) if shown else "No interference") + note
+
+
+@tool()
+def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to_bend: float = 0,
+                            sheet: str = "", brake_length: float = 0, clearance: float = 0.3,
+                            parts: str = "") -> str:
+    """Can it be made? Run it before a part or assembly goes to the shop.
+
+    Active sheet metal part — checked on its flat pattern (made if there is none):
+    the rule (a TXX-VYY shop rule must match the thickness), the flat size against the
+    sheet, every flange against the V die (on both sides of a bend line the sheet must reach
+    V/2 + thickness, to the edge or to the next bend), holes too close to a bend line
+    (nearer than V/2 they are pulled out of shape) and holes smaller than the thickness.
+    Active assembly — parts closer than `clearance` without touching: no room for the
+    powder coat. Touching parts and fasteners are fine.
+    "problems" is what to fix; "notes" is what was assumed or left unchecked.
+
+    Args:
+        v_die: V die opening in mm. 0 = from the rule name (T15-V10 → 10), else 8 x thickness.
+        min_flange: Flat sheet needed beside a bend line, mm. 0 = V/2 + thickness.
+        min_hole_to_bend: Hole edge to bend line, mm. 0 = V/2, or radius + 2 x thickness if more.
+        sheet: Stock sheet, e.g. "2500x1250". Empty = the smallest standard sheet that fits
+               (2000x1000, 2500x1250, 3000x1500) is named.
+        brake_length: Press brake length in mm; 0 = bend length is not checked.
+        clearance: Assembly: smallest gap in mm between parts that don't touch (0.3 for powder coat).
+        parts: Assembly: name patterns, ","-separated, of the parts to look at (default: all).
+    """
+    if inv.active_document().DocumentType == _api.kAssemblyDocumentObject:
+        names = [s.strip() for s in parts.split(",") if s.strip()] or None
+        return json.dumps(inv.check_clearances(clearance, names), indent=1, ensure_ascii=False)
+    return json.dumps(inv.check_sheet_metal_part(v_die, min_flange, min_hole_to_bend, sheet, brake_length),
+                      indent=1, ensure_ascii=False)
 
 
 @tool()
