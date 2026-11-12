@@ -168,6 +168,15 @@ def assembly_tests(inv, run, plate, pin):
         return out
     run.step("replace_occurrence keeps the constraint, archives the old file", replace)
 
+    def assembly_drawing():
+        folder = os.path.dirname(pin)
+        inv.save_document(os.path.join(folder, "smoke_asm.iam"), overwrite=True)
+        out = inv.make_drawing(os.path.join(folder, "smoke_asm.pdf"), parts_list=True, balloons=True)
+        if "parts list: 2 row(s)" not in out or "balloons: 2 on" not in out or "FAILED" in out or "COVERS" in out:
+            _raise(out)
+        return out
+    run.step("make_drawing parts list and balloons", assembly_drawing)
+
     run.step("ground pin", lambda: inv.ground_occurrence(2, True))
     run.step("unground pin", lambda: inv.ground_occurrence(2, False))
     run.step("delete_occurrence", lambda: inv.delete_occurrence(2, force=True))

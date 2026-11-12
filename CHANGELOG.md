@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `create_drawing` annotates what the shop reads:
+  - assemblies: `parts_list` (seated on the title block) and `balloons` (one per different
+    first-level component);
+  - `section="vertical"` / `"horizontal"` (optionally `":<mm>"` off the middle) and
+    `detail=[x, y, z, radius]`;
+  - flat patterns: direction, angle and radius on every bend line, and a table that counts the
+    bends of each kind.
+  An annotation that fails is named in the answer and the drawing is still made.
 - `capture_view(look_from=[x, y, z], target=, up=, perspective=)`: a picture from a point you
   name, for a model whose `front` is not Inventor's front, or a detail inside an assembly.
   `zoom` gets closer in every view.
