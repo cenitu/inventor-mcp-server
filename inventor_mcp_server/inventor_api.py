@@ -3321,12 +3321,22 @@ class InventorConnection:
     # decides what Inventor calls them.
     _SPOTS = {"top": (0.25, 0.30), "right": (0.58, 0.66), "iso": (0.85, 0.66)}
 
+    # Where a section view goes, by the direction of its cutting line: the place of the
+    # projected view it would otherwise hide.
+    _SECTION_SPOTS = {"vertical": "right", "horizontal": "top"}
+    _DETAIL_SPOT = (0.58, 0.36)
+
     def make_drawing(self, pdf_path: str, views: str = "front,top,right,iso",
                      template: str = "ISO", scale: float = 0, flat: bool = False,
-                     drawing_path: str = "") -> str:
+                     drawing_path: str = "", parts_list: bool = False, balloons: bool = False,
+                     section: str = "", detail=None, bend_notes: bool = True) -> str:
         """2D drawing of the active (saved) part or assembly: a base view, projected views,
         overall dimensions on the base view and the model dimensions Inventor can retrieve,
-        exported to PDF. flat=True draws a sheet metal part's flat pattern (one view)."""
+        exported to PDF. flat=True draws a sheet metal part's flat pattern (one view), with a
+        note on every bend line and a table of the bends (bend_notes).
+        parts_list / balloons: assemblies — the list above the title block, a balloon per
+        first-level component. section: "vertical" or "horizontal" cut through the base
+        view, optionally ":<mm>" off its middle. detail: [x, y, z, radius] in model mm."""
         model = self.active_document()
         if not model.FullFileName:
             raise RuntimeError("Save the model first — a drawing references the file.")
@@ -3343,6 +3353,22 @@ class InventorConnection:
         unknown = [n for n in extra if n not in self._SPOTS]
         if unknown:
             raise ValueError(f"Projected views can be {', '.join(self._SPOTS)} — not {', '.join(unknown)}")
+        is_assembly = model.DocumentType == kAssemblyDocumentObject
+        if (parts_list or balloons) and not is_assembly:
+            raise ValueError("parts_list and balloons are for an assembly")
+        if flat and (section or detail is not None):
+            raise ValueError("section and detail are for the folded model — not with flat=True")
+        cut_kind, cut_offset = "", 0.0
+        if section:
+            cut_kind, _, off = section.strip().lower().partition(":")
+            if cut_kind not in self._SECTION_SPOTS:
+                raise ValueError('section is "vertical" or "horizontal", optionally ":<mm>" off the middle')
+            cut_offset = float(off) if off.strip() else 0.0
+            if self._SECTION_SPOTS[cut_kind] in extra:
+                raise ValueError(f"A {cut_kind} section goes where the '{self._SECTION_SPOTS[cut_kind]}' view "
+                                 "is — leave that view out of `views`")
+        if detail is not None and (len(detail) != 4 or float(detail[3]) <= 0):
+            raise ValueError("detail is [x, y, z, radius] in model mm")
         comp = model.ComponentDefinition
         if flat:
             if not getattr(comp, "HasFlatPattern", False):
@@ -3374,6 +3400,22 @@ class InventorConnection:
                 else:
                     sheet.DrawingViews.AddProjectedView(base, pt(*self._SPOTS[name]), 32258)
                 placed.append(name)
+            notes = []  # what was added besides the views, and what could not be
+            by_name = {placed[0]: base}
+            for i, name in enumerate(extra):
+                by_name[name] = sheet.DrawingViews.Item(i + 2)
+            if cut_kind:
+                self._annotate(notes, "section", lambda: self._section_view(
+                    sheet, base, cut_kind, cut_offset, scale, pt(*self._SPOTS[self._SECTION_SPOTS[cut_kind]])))
+            if detail is not None:
+                self._annotate(notes, "detail", lambda: self._detail_view(
+                    sheet, base, detail, scale, pt(*self._DETAIL_SPOT)))
+            if parts_list:
+                self._annotate(notes, "parts list", lambda: self._parts_list(sheet, base))
+            if balloons:
+                self._annotate(notes, "balloons", lambda: self._balloons(sheet, by_name.get("iso", base), comp))
+            if flat and bend_notes:
+                self._annotate(notes, "bends", lambda: self._bend_notes(sheet, base))
             overall = self._overall_dimensions(sheet, base)
             retrieved = 0
             try:
@@ -3394,11 +3436,189 @@ class InventorConnection:
             return (f"Drawing of {model.DisplayName}: {', '.join(placed)}, scale {ratio}, "
                     f"overall {' x '.join(overall) or '-'} mm, {retrieved} retrieved dimension(s), "
                     f"sheet {sheet.Width * 10:.0f}x{sheet.Height * 10:.0f} mm"
-                    f"\nPDF: {pdf_path} ({os.path.getsize(pdf_path) // 1024} KB)"
+                    + "".join(f"\n{n}" for n in notes)
+                    + f"\nPDF: {pdf_path} ({os.path.getsize(pdf_path) // 1024} KB)"
                     + (f"\nDrawing: {drawing_path}" if drawing_path else ""))
         finally:
             if not drawing_path:
                 drawing.Close(True)
+
+    @staticmethod
+    def _annotate(notes: list, what: str, fn):
+        """Run one annotation step; the drawing is still worth having if it fails."""
+        try:
+            notes.append(fn())
+        except Exception as e:
+            notes.append(f"{what}: FAILED — {describe_com_error(e)}")
+
+    def _section_view(self, sheet, base, kind: str, offset_mm: float, scale: float, position) -> str:
+        """A full section of the base view along a vertical / horizontal line through its
+        middle (offset_mm in model mm, to the right / up)."""
+        tg = self._tg()
+        off = offset_mm / 10 * scale
+        cx, cy = base.Center.X, base.Center.Y
+        w, h = base.Width / 2 + 0.8, base.Height / 2 + 0.8
+        ends = (((cx + off, cy + h), (cx + off, cy - h)) if kind == "vertical"
+                else ((cx - w, cy + off), (cx + w, cy + off)))
+        sketch = base.Sketches.Add()
+        sketch.Edit()
+        try:
+            a, b = (sketch.SheetToSketchSpace(tg.CreatePoint2d(*e)) for e in ends)
+            sketch.SketchLines.AddByTwoPoints(a, b)
+        finally:
+            sketch.ExitEdit()
+        view = sheet.DrawingViews.AddSectionView(base, sketch, position, 32258, scale, True, "A")
+        return f"section A-A ({kind}" + (f", {offset_mm:g} mm off the middle" if offset_mm else "") + f"): {view.Name}"
+
+    def _detail_view(self, sheet, base, detail, scale: float, position) -> str:
+        """A circular detail of the base view around a model point, at the next larger scale."""
+        x, y, z, r = (float(v) for v in detail)
+        center = base.ModelToSheetSpace(self._tg().CreatePoint(x / 10, y / 10, z / 10))
+        bigger = min((s for s in self._SCALES if s >= scale * 2), default=scale * 2)
+        view = sheet.DrawingViews.AddDetailView(base, position, 32258, True, center, r / 10 * scale,
+                                                None, bigger, True, "B")
+        ratio = f"{bigger:g}:1" if bigger >= 1 else f"1:{1 / bigger:g}"
+        return f"detail B (R{r:g} mm at {x:g}, {y:g}, {z:g}), scale {ratio}: {view.Name}"
+
+    @staticmethod
+    def _boxes_overlap(a, b) -> bool:
+        return not (a.MaxPoint.X <= b.MinPoint.X or b.MaxPoint.X <= a.MinPoint.X
+                    or a.MaxPoint.Y <= b.MinPoint.Y or b.MaxPoint.Y <= a.MinPoint.Y)
+
+    def _seat_table(self, sheet, table):
+        """Move a table so that it sits on the title block, right edges in line (or into the
+        border's top right corner when the sheet has no title block)."""
+        box = table.RangeBox
+        try:
+            tb = sheet.TitleBlock.RangeBox
+            dx, dy = tb.MaxPoint.X - box.MaxPoint.X, tb.MaxPoint.Y - box.MinPoint.Y
+        except Exception:
+            try:
+                corner = sheet.Border.RangeBox.MaxPoint
+                dx, dy = corner.X - box.MaxPoint.X, corner.Y - box.MaxPoint.Y
+            except Exception:
+                return
+        pos = table.Position
+        table.Position = self._tg().CreatePoint2d(pos.X + dx, pos.Y + dy)
+
+    def _table_clash(self, sheet, table) -> str:
+        box = table.RangeBox
+        hit = [v.Name for v in (sheet.DrawingViews.Item(i) for i in range(1, sheet.DrawingViews.Count + 1))
+               if box.MaxPoint.X > v.Left and box.MinPoint.X < v.Left + v.Width
+               and box.MaxPoint.Y > v.Top - v.Height and box.MinPoint.Y < v.Top]
+        return f" — it COVERS {', '.join(hit)}: fewer views, or a smaller scale" if hit else ""
+
+    def _parts_list(self, sheet, base) -> str:
+        """The assembly's first-level parts list, seated on the title block."""
+        table = sheet.PartsLists.Add(base, self._tg().CreatePoint2d(sheet.Width * 0.9, sheet.Height * 0.9),
+                                     46593)  # kStructured: first-level components
+        self._seat_table(sheet, table)
+        return f"parts list: {table.PartsListRows.Count} row(s)" + self._table_clash(sheet, table)
+
+    def _balloons(self, sheet, view, comp) -> str:
+        """A balloon per first-level component (one for each file), pointing at one of its
+        edges in the view, set on a ring around the view."""
+        tg = self._tg()
+        cx, cy = view.Center.X, view.Center.Y
+        ring = math.hypot(view.Width, view.Height) / 2 + 1.0
+        # The outermost edge of each first-level component in the view. (DrawingCurves(occ)
+        # is a type mismatch late-bound, so every curve is asked whose edge it is.)
+        outermost = {}
+        for j in range(1, view.DrawingCurves.Count + 1):
+            c = view.DrawingCurves.Item(j)
+            try:
+                owner = c.ModelGeometry.ContainingOccurrence
+                name = self._path_of(owner).split("/")[0]
+                m, how = c.MidPoint, 57859            # kMidPointIntent
+                if m is None:                          # a full circle has no middle
+                    m, how = c.CenterPoint, 57863      # kCircularTopPointIntent
+            except Exception:
+                continue
+            if m is None:
+                continue
+            d = math.hypot(m.X - cx, m.Y - cy)
+            if name not in outermost or d > outermost[name][0]:
+                outermost[name] = (d, c, m, how)
+        targets, seen, hidden = [], set(), []
+        for i in range(1, comp.Occurrences.Count + 1):
+            occ = comp.Occurrences.Item(i)
+            key = occ.Definition.Document.InternalName
+            if key in seen:
+                continue
+            best = outermost.get(occ.Name)
+            if best is None:
+                continue
+            seen.add(key)
+            targets.append((math.atan2(best[2].Y - cy, best[2].X - cx), best[1], occ.Name, best[3]))
+        for i in range(1, comp.Occurrences.Count + 1):
+            occ = comp.Occurrences.Item(i)
+            if occ.Definition.Document.InternalName not in seen and occ.Name not in hidden:
+                hidden.append(occ.Name)
+        targets.sort(key=lambda t: t[0])
+        gap = 1.4 / ring  # balloons this far apart on the ring don't touch
+        placed, failed, last = 0, [], None
+        for angle, curve, name, how in targets:
+            if last is not None and angle - last < gap:
+                angle = last + gap
+            last = angle
+            try:
+                points = self.app.TransientObjects.CreateObjectCollection()
+                points.Add(tg.CreatePoint2d(cx + ring * math.cos(angle), cy + ring * math.sin(angle)))
+                try:
+                    intent = sheet.CreateGeometryIntent(curve, how)
+                except Exception:
+                    intent = sheet.CreateGeometryIntent(curve)
+                points.Add(intent)
+                sheet.Balloons.Add(points)
+                placed += 1
+            except Exception as e:
+                failed.append(f"{name} ({describe_com_error(e)})")
+        return (f"balloons: {placed} on {view.Name}"
+                + (f"; not visible in that view: {', '.join(hidden[:15])}" if hidden else "")
+                + (f"; FAILED: {'; '.join(failed[:8])}" if failed else ""))
+
+    def _bend_notes(self, sheet, view) -> str:
+        """A bend note (direction, angle, radius) on every bend line of a flat pattern view,
+        and a table that counts the bends of each kind — what the press brake needs set up."""
+        notes = sheet.DrawingNotes.BendNotes
+        texts, failed = [], 0
+        for i in range(1, view.DrawingCurves.Count + 1):
+            c = view.DrawingCurves.Item(i)
+            try:
+                if c.EdgeType not in (82690, 82691):  # kBendUpEdge, kBendDownEdge
+                    continue
+            except Exception:
+                continue
+            try:
+                texts.append(" ".join(notes.Add(c).Text.split()))
+            except Exception:
+                failed += 1
+        if not texts and not failed:
+            return "bends: none in this part"
+        kinds = {}
+        for t in texts:
+            kinds[t] = kinds.get(t, 0) + 1
+        rows = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+        out = f"bends: {len(texts)} noted — " + ", ".join(f"{n} x {t}" for t, n in rows)
+        if failed:
+            out += f"; {failed} bend line(s) got no note"
+        try:
+            # Late-bound, the two string arrays go as arrays of variants, which Add refuses
+            # (E_INVALIDARG) — so the call is made with its argument types spelled out.
+            tables = sheet.CustomTables
+            strings = pythoncom.VT_ARRAY | pythoncom.VT_BSTR
+            cells = [v for t, n in rows for v in (str(n), t)]
+            table = win32com.client.Dispatch(tables._oleobj_.InvokeTypes(
+                tables._oleobj_.GetIDsOfNames("Add"), 0, pythoncom.DISPATCH_METHOD, (pythoncom.VT_DISPATCH, 0),
+                ((pythoncom.VT_BSTR, 1), (pythoncom.VT_DISPATCH, 1), (pythoncom.VT_I4, 1), (pythoncom.VT_I4, 1),
+                 (strings, 1), (strings, 1), (pythoncom.VT_ARRAY | pythoncom.VT_R8, 1)),
+                "BENDS", self._tg().CreatePoint2d(sheet.Width * 0.9, sheet.Height * 0.9),
+                2, len(rows), ["QTY", "BEND"], cells, [1.2, 4.8]))  # column widths, cm
+            self._seat_table(sheet, table)
+            out += self._table_clash(sheet, table)
+        except Exception as e:
+            out += f"; bend table FAILED — {describe_com_error(e)}"
+        return out
 
     def _overall_dimensions(self, sheet, view) -> list[str]:
         """Overall width and height on a view: between its outermost vertical lines and its
