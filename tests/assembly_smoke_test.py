@@ -168,6 +168,18 @@ def assembly_tests(inv, run, plate, pin):
         return out
     run.step("replace_occurrence keeps the constraint, archives the old file", replace)
 
+    def clearances():
+        inv.place_component(plate, 0, 0, 10.1)   # 0.1 mm above the grounded plate
+        try:
+            out = inv.check_clearances()
+            pairs = [(r["a"], r["b"], r["gap_mm"]) for r in out["too_close"]]
+            if ("smoke_plate:1", "smoke_plate:2", 0.1) not in pairs:
+                _raise(str(out))
+            return out
+        finally:
+            inv.delete_occurrence("smoke_plate:2", force=True)
+    run.step("check_clearances finds a 0.1 mm gap", clearances)
+
     def assembly_drawing():
         folder = os.path.dirname(pin)
         inv.save_document(os.path.join(folder, "smoke_asm.iam"), overwrite=True)

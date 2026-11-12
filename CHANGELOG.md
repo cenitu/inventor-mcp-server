@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`check_manufacturability`** — before it goes to the shop. A sheet metal part, on its flat
+  pattern: the rule against the thickness (TXX-VYY names give the V die), the flat size against
+  the sheet, each flange against the die (V/2 + thickness of sheet on both sides of a bend line,
+  to the edge or the next bend), holes nearer a bend line than V/2, holes smaller than the
+  thickness, the longest bend against the press brake. An assembly: parts closer than 0.3 mm
+  without touching — no room for the powder coat.
 - `create_drawing` annotates what the shop reads:
   - assemblies: `parts_list` (seated on the title block) and `balloons` (one per different
     first-level component);

@@ -287,6 +287,18 @@ def output_tests(inv, run):
         return out if "bends: 1 noted" in out and "FAILED" not in out else _raise(out)
     run.step("make_drawing flat: bend note and bend table", bent_flat)
 
+    def bend_check():
+        good = inv.check_sheet_metal_part()   # the bent part is active again after its drawing
+        if good["problems"] or len(good["bends"]) != 1 or not good["notes"]:
+            _raise(str(good))
+        tight = inv.check_sheet_metal_part(v_die=120, sheet="100x100", brake_length=100)
+        texts = " | ".join(tight["problems"])
+        for want in ("reach across a V120 die", "does not fit a 100 x 100", "more than the 100 mm press brake"):
+            if want not in texts:
+                _raise(f"missing {want!r}: {texts}")
+        return f"legs {good['bends'][0]['legs_mm']} mm; {len(tight['problems'])} problems with a V120 die"
+    run.step("check_sheet_metal_part: legs, die, sheet, brake", bend_check)
+
     def section_and_detail():
         inv.create_part("smoke_cut")
         inv.create_sketch("XY")
