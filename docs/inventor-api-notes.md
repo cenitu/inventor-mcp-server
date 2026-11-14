@@ -597,6 +597,14 @@ Out-parameters come back as a tuple under pywin32 dynamic dispatch:
   faces (planar and cylindrical ones are tight). Don't use it for exact sizes; measure
   with `MeasureTools` or evaluate the surface.
 
+## Flat pattern geometry
+
+- **`FlatPattern.FlatBendResults` lists every bend twice** — once for the top face and
+  once for the bottom (`IsOnBottomFace`). Count and measure the top ones.
+- The bend centre line is `FlatBendResult.Edge` (start / stop vertex, cm); the contour
+  and the holes are the outer and inner `EdgeLoops` of `FlatPattern.TopFace`. A hole is
+  an inner loop with one edge of `GeometryType` kCircleCurve (5124).
+
 ## Drawings
 
 - **`DrawingView.DrawingCurves(occurrence)` is a type mismatch late-bound**

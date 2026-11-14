@@ -299,6 +299,33 @@ try:
 except RuntimeError as e:
     check("nothing is saved into a Content Center folder", "Content Center folder" in str(e), str(e)[:100])
 
+print("Flat pattern checks (no Inventor needed):")
+import math
+_api_mod = importlib.import_module("inventor_mcp_server.inventor_api")
+_box = [[(0, 0), (100, 0)], [(100, 0), (100, 60)], [(100, 60), (0, 60)], [(0, 60), (0, 0)]]
+_ring = lambda cx, cy, r: [(cx + r * math.cos(k * math.pi / 16), cy + r * math.sin(k * math.pi / 16)) for k in range(33)]
+found = _api_mod.flat_pattern_problems(_box, [], [{"a": (0, 12), "b": (100, 12), "radius": 1.67}], 1.5, 10)
+check("a 12 mm flange on a V10 die is fine, both legs measured",
+      found["problems"] == [] and found["bends"][0]["legs_mm"] == [48.0, 12.0], str(found))
+found = _api_mod.flat_pattern_problems(_box, [], [{"a": (0, 4), "b": (100, 4), "radius": 1.67}], 1.5, 10)
+check("a 4 mm flange does not reach across a V10 die",
+      len(found["problems"]) == 1 and "needs 6.5 mm" in found["problems"][0], str(found["problems"]))
+found = _api_mod.flat_pattern_problems(
+    _box, [{"points": _ring(30, 15, 2.5), "diameter": 5}, {"points": _ring(70, 40, 0.5), "diameter": 1},
+           {"points": _ring(50, 12, 3), "diameter": 6}, {"points": _ring(50, 40, 4), "diameter": 8}],
+    [{"a": (0, 12), "b": (100, 12), "radius": 1.67}], 1.5, 10)
+texts = " | ".join(found["problems"])
+check("holes: near the bend, across it, smaller than the sheet, and a good one left alone",
+      len(found["problems"]) == 3 and "0.5 mm from the bend line" in texts and "across the bend line" in texts
+      and "smaller than the 1.5 mm sheet" in texts, texts)
+found = _api_mod.flat_pattern_problems(
+    _box, [], [{"a": (0, 20), "b": (100, 20), "radius": 1.67}, {"a": (0, 24), "b": (100, 24), "radius": 1.67}], 1.5, 10)
+check("two bends 4 mm apart are named as too close to each other",
+      sum("next bend" in p for p in found["problems"]) == 2, str(found["problems"]))
+check("TXX-VYY rule names give thickness and die",
+      _api_mod.rule_from_name("T15-V10") == (1.5, 10.0) and _api_mod.rule_from_name("t20-v12") == (2.0, 12.0)
+      and _api_mod.rule_from_name("Default_mm") is None)
+
 print("Pictures (no Inventor needed):")
 import base64, tempfile
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")

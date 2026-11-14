@@ -2168,6 +2168,38 @@ def check_interference(set_a: str, set_b: str = "", ignore_fasteners: bool = Fal
 
 
 @tool()
+def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to_bend: float = 0,
+                            sheet: str = "", brake_length: float = 0, clearance: float = 0.3,
+                            parts: str = "") -> str:
+    """Can it be made? Run it before a part or assembly goes to the shop.
+
+    Active sheet metal part — checked on its flat pattern (made if there is none):
+    the rule (a TXX-VYY shop rule must match the thickness), the flat size against the
+    sheet, every flange against the V die (on both sides of a bend line the sheet must reach
+    V/2 + thickness, to the edge or to the next bend), holes too close to a bend line
+    (nearer than V/2 they are pulled out of shape) and holes smaller than the thickness.
+    Active assembly — parts closer than `clearance` without touching: no room for the
+    powder coat. Touching parts and fasteners are fine.
+    "problems" is what to fix; "notes" is what was assumed or left unchecked.
+
+    Args:
+        v_die: V die opening in mm. 0 = from the rule name (T15-V10 → 10), else 8 x thickness.
+        min_flange: Flat sheet needed beside a bend line, mm. 0 = V/2 + thickness.
+        min_hole_to_bend: Hole edge to bend line, mm. 0 = V/2, or radius + 2 x thickness if more.
+        sheet: Stock sheet, e.g. "2500x1250". Empty = the smallest standard sheet that fits
+               (2000x1000, 2500x1250, 3000x1500) is named.
+        brake_length: Press brake length in mm; 0 = bend length is not checked.
+        clearance: Assembly: smallest gap in mm between parts that don't touch (0.3 for powder coat).
+        parts: Assembly: name patterns, ","-separated, of the parts to look at (default: all).
+    """
+    if inv.active_document().DocumentType == _api.kAssemblyDocumentObject:
+        names = [s.strip() for s in parts.split(",") if s.strip()] or None
+        return json.dumps(inv.check_clearances(clearance, names), indent=1, ensure_ascii=False)
+    return json.dumps(inv.check_sheet_metal_part(v_die, min_flange, min_hole_to_bend, sheet, brake_length),
+                      indent=1, ensure_ascii=False)
+
+
+@tool()
 def measure_distance(a: str, b: str) -> str:
     """Minimum distance in mm between two occurrences (0 = touching/overlapping).
     Names as in manage_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
