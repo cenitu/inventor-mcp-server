@@ -1901,6 +1901,40 @@ def add_circular_pattern(
     return inv.circular_pattern(feature_index, count, angle, axis)
 
 
+@tool()
+def add_rectangular_pattern(features: str, x_count: int = 2, x_spacing: float = 10, x_axis: str = "X",
+                            y_count: int = 1, y_spacing: float = 0, y_axis: str = "Y") -> str:
+    """Repeat features in a row or a grid — a line of slots, a field of mounting holes, louvres.
+    One hole + add_rectangular_pattern instead of twenty holes: one number changes the pitch.
+    Works on sheet metal cuts too. A pattern whose copies all miss the body is taken back.
+
+    Args:
+        features: Feature indices or names, ","-separated (manage_features list), e.g. "3" or "Hole1,Cut2".
+        x_count: Instances along x_axis, the original included.
+        x_spacing: Pitch in mm along x_axis; negative = the other way.
+        x_axis: X, Y or Z (model axes).
+        y_count: Rows along y_axis (1 = a single row).
+        y_spacing: Row pitch in mm; negative = the other way.
+        y_axis: X, Y or Z, different from x_axis.
+    """
+    return inv.rectangular_pattern(features, x_count, x_spacing, x_axis, y_count, y_spacing, y_axis)
+
+
+@tool()
+def add_mirror(features: str = "", plane: str = "YZ", body: bool = False, remove_original: bool = False) -> str:
+    """Mirror features, or the whole body, across a plane. For a symmetric part model one half
+    and mirror it — half the work, and it stays symmetric when a dimension changes.
+    A mirror that changes nothing (the copy lands off the body or on the original) is taken back.
+
+    Args:
+        features: Feature indices or names, ","-separated (manage_features list). Not with body=True.
+        plane: Origin plane XY, XZ or YZ, or the name of a work plane.
+        body: Mirror the whole solid; the two halves join where they meet on the plane.
+        remove_original: With body=True: keep only the mirrored side (left-hand from right-hand part).
+    """
+    return inv.mirror(features, plane, body, remove_original)
+
+
 # ---------- Parameters ----------
 
 # ---------- Sheet Metal ----------

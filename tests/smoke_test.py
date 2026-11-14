@@ -180,6 +180,39 @@ def part_tests(inv, run):
     run.step("unsuppress feature", lambda: inv.suppress_feature([3], False))
     run.step("delete feature", lambda: inv.delete_feature([3]))
 
+    def grid_and_mirror():
+        import math
+        inv.create_part("smoke_grid")
+        inv.create_sketch("XY")
+        inv.draw_rectangle(40, 30, 80, 60)          # the plate lies from the origin to (80, 60)
+        inv.extrude(5)
+        inv.hole(10, 10, diameter=4)
+        hole_volume = math.pi * 2 * 2 * 5
+        v0 = inv._vol_state()[0]
+        out = inv.rectangular_pattern("2", 4, 20, "X", 2, 40, "Y")
+        if abs((v0 - inv._vol_state()[0]) - 7 * hole_volume) > 1:
+            _raise(f"8 holes expected: {out}")
+        _expect_error(lambda: inv.rectangular_pattern(2, 2, 500), "changed nothing")
+        inv.hole(70, 30, diameter=6)                 # mirrored across XZ it lands at (70, -30): off the plate
+        _expect_error(lambda: inv.mirror("Hole2", plane="XZ"), "changed nothing")
+        plane = inv.active_part().WorkPlanes.AddByPlaneAndOffset(inv.active_part().WorkPlanes.Item(1), 4.0)
+        plane.Name = "Middle"                        # x = 40: the copy lands at (10, 30)
+        v = inv._vol_state()[0]
+        out_f = inv.mirror("Hole2", plane="Middle")
+        if abs((v - inv._vol_state()[0]) - math.pi * 3 * 3 * 5) > 1:
+            _raise(f"one more Ø6 hole expected: {out_f}")
+        n = inv.active_part().Features.Count
+        v1 = inv._vol_state()[0]
+        out2 = inv.mirror(body=True, plane="YZ")
+        if abs(inv._vol_state()[0] - 2 * v1) > 1:
+            _raise(f"the mirrored body should double the volume: {out2}")
+        _expect_error(lambda: inv.mirror(body=True, plane="YZ"), "changed nothing")
+        if inv.active_part().Features.Count != n + 1:
+            _raise("a mirror that changed nothing was left behind")
+        _expect_error(lambda: inv.mirror("NoSuchFeature"), "No feature")
+        return out + " / " + out2
+    run.step("rectangular_pattern 4x2 and mirror of the body", grid_and_mirror)
+
     run.step("create_part(metric) #3", lambda: inv.create_part("smoke_revolve"))
     run.step("create_sketch(XY) #3", lambda: inv.create_sketch("XY"))
     run.step("draw_rectangle offset", lambda: inv.draw_rectangle(30, 10, 20, 20))
