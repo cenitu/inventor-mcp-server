@@ -278,6 +278,35 @@ def output_tests(inv, run):
     run.step("make_drawing PDF", lambda: inv.make_drawing(pdf, views="front,top,right"))
     run.step("PDF written", lambda: "ok" if os.path.getsize(pdf) > 0 else _raise("empty PDF"))
 
+    def bent_flat():
+        inv.create_part("smoke_bent", "sheet_metal")
+        inv.set_sheet_metal_thickness(2)
+        inv.sheet_profile("L", 60, 40, 150)
+        inv.save_document(os.path.join(tmp, "smoke_bent.ipt"))
+        out = inv.make_drawing(os.path.join(tmp, "bent.pdf"), flat=True)
+        return out if "bends: 1 noted" in out and "FAILED" not in out else _raise(out)
+    run.step("make_drawing flat: bend note and bend table", bent_flat)
+
+    def section_and_detail():
+        inv.create_part("smoke_cut")
+        inv.create_sketch("XY")
+        inv.draw_rectangle(0, 0, 80, 60)
+        inv.extrude(12)
+        inv.hole(25, 15, diameter=6)
+        inv.save_document(os.path.join(tmp, "smoke_cut.ipt"))
+        out = inv.make_drawing(os.path.join(tmp, "cut.pdf"), views="front,top,iso",
+                               section="vertical", detail=[25, 15, 12, 8])
+        if "section A-A" not in out or "detail B" not in out or "FAILED" in out:
+            _raise(out)
+        return out
+    run.step("make_drawing section and detail", section_and_detail)
+    run.step("a section where a view is raises",
+             lambda: _expect_error(lambda: inv.make_drawing(os.path.join(tmp, "x.pdf"), section="vertical"),
+                                   "leave that view out"))
+    run.step("parts_list on a part raises",
+             lambda: _expect_error(lambda: inv.make_drawing(os.path.join(tmp, "x.pdf"), parts_list=True),
+                                   "for an assembly"))
+
     def drawing_status():
         inv.app.Documents.Add(api.kDrawingDocumentObject, "", True)
         info = inv.get_document_info()
