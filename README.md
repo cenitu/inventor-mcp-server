@@ -29,12 +29,12 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Features
 
-- **63 MCP tools**: sketching, extrude/revolve, shell, loft, sweep, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular patterns, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
+- **65 MCP tools**: sketching, extrude/revolve, shell, loft, sweep, native hole features (drilled / tapped / counterbore), fillets, chamfers, circular and rectangular patterns, mirror, sheet metal (named rules / Face / auto-mitered Flanges / Cut at world coordinates / Corner Round, with Flat Pattern support), parameters
 - **Assemblies with vendor parts**: `import_step` (keeps the files in your project folder), placement with full orientation, `check_interference` / `measure_distance`, and `sweep_rotation` to check a door or lock moves freely through its whole range
 - **Assemblies (IAM)**: place components, ground them, constrain by origin geometry (mate / flush / angle) or drop a bolt into a hole with a single Insert constraint
 - **`execute_python` power tool** — run arbitrary Python against the live COM connection with a persistent namespace (escape hatch for anything not covered by dedicated tools)
 - **Auto-reporting** — every feature operation returns a volume/topology delta (`Hole1 | V 23497 (-503 mm³) | F7 E14`), so the AI can self-verify each step
-- **One tool per job** — 63 tools with verb_noun names: `find_faces` / `find_edges` work in a part and at any depth of an assembly, `constrain` takes origin geometry, faces and edges, and `manage_*` tools group what you do to documents, occurrences, features, parameters, constraints, materials and sheet metal rules
+- **One tool per job** — 65 tools with verb_noun names: `find_faces` / `find_edges` work in a part and at any depth of an assembly, `constrain` takes origin geometry, faces and edges, and `manage_*` tools group what you do to documents, occurrences, features, parameters, constraints, materials and sheet metal rules
 - **Protects your files** — `save_document` saves only the active document unless asked, never a library or Content Center file; add your own paths with `INVENTOR_MCP_PROTECTED` or `~/.inventor-mcp/protected.txt`. Deleting a component says what depends on it first, and reports what moved; replacing one reports the constraints it lost
 - **Never hangs on a dialog** — calls run with `SilentOperation` on a dedicated Inventor thread. A call stuck behind a modal dialog, or a long job, returns within 50 s with the dialog's title and text (read from the window list, no COM call); `manage_call(wait_seconds=30)` follows it — with the prints and `progress()` line so far — and returns the result the moment it finishes; `manage_call(action="cancel")` stops it
 - **Checks before the shop does** — `check_manufacturability` reads a sheet metal part's flat pattern: flanges too short for the V die, holes too close to a bend line, a flat that does not fit the sheet, a rule that does not match the thickness; on an assembly it finds parts with no room for the powder coat
@@ -223,7 +223,7 @@ Contributions welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, 
 edit → `reload_api` loop, and how to add a tool. Especially valuable:
 - **Testing on Inventor 2024/2025** — run `tests/smoke_test.py` and file an
   *Inventor version test report* (no code needed)
-- Drawing (IDW) support, and more modeling tools (rib, coil, mirror)
+- More modeling tools (rib, coil)
 - More DIN/ISO part recipes
 - Bug reports with the exact COM error and Inventor version
 

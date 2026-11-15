@@ -2233,6 +2233,106 @@ class InventorConnection:
             f"around {axis.upper()}-axis, {angle} deg: {pattern.Name}"
         )
 
+    def _features(self, comp, features) -> tuple:
+        """(ObjectCollection, names) for feature indices or names — a list, or "2,3" / "Hole1"."""
+        if isinstance(features, (int, str)):
+            features = [s.strip() for s in str(features).split(",") if s.strip()]
+        if not features:
+            raise ValueError("Name at least one feature (index or name from manage_features list)")
+        col = self.app.TransientObjects.CreateObjectCollection()
+        names = []
+        for f in features:
+            key = str(f).strip()
+            try:
+                feat = comp.Features.Item(int(key) if key.isdigit() else key)
+            except Exception:
+                have = ", ".join(f"[{i}] {comp.Features.Item(i).Name}" for i in range(1, comp.Features.Count + 1))
+                raise ValueError(f"No feature {key!r}. Features: {have}") from None
+            col.Add(feat)
+            names.append(feat.Name)
+        return col, names
+
+    def _require_changed(self, feat, before, label: str, hint: str):
+        """A pattern or mirror whose copies all miss the body is created without an error
+        and changes nothing. Delete it and say so."""
+        after = self._vol_state()
+        if before and after and abs(after[0] - before[0]) < 1e-3 and after[1:] == before[1:]:
+            name = feat.Name
+            feat.Delete(False, False, False)
+            raise RuntimeError(f"{label} '{name}' changed nothing and was deleted — {hint}")
+
+    def rectangular_pattern(self, features, x_count: int = 2, x_spacing: float = 10, x_axis: str = "X",
+                            y_count: int = 1, y_spacing: float = 0, y_axis: str = "Y") -> str:
+        """Repeat features in rows: x_count instances x_spacing mm apart along x_axis, and
+        optionally y_count rows y_spacing mm apart along y_axis. Counts include the original;
+        a negative spacing goes the other way along the axis."""
+        comp = self.active_part()
+        col, names = self._features(comp, features)
+        if x_count < 1 or y_count < 1 or x_count * y_count < 2:
+            raise ValueError("A pattern needs at least 2 instances (x_count x y_count)")
+        if (x_count > 1 and not x_spacing) or (y_count > 1 and not y_spacing):
+            raise ValueError("Give the spacing for every direction that has more than one instance")
+        axes = {"X": 1, "Y": 2, "Z": 3}
+        try:
+            ax, ay = comp.WorkAxes.Item(axes[x_axis.upper()]), comp.WorkAxes.Item(axes[y_axis.upper()])
+        except KeyError:
+            raise ValueError("x_axis and y_axis are X, Y or Z") from None
+        if y_count > 1 and x_axis.upper() == y_axis.upper():
+            raise ValueError("x_axis and y_axis must differ")
+        before = self._vol_state()
+        rpf = comp.Features.RectangularPatternFeatures
+        d = rpf.CreateDefinition(col, ax, x_spacing >= 0, int(x_count), abs(x_spacing) / 10 or 1.0)
+        if y_count > 1:
+            d.YDirectionEntity = ay
+            d.NaturalYDirection = y_spacing >= 0
+            d.YCount = int(y_count)
+            d.YSpacing = abs(y_spacing) / 10
+        feat = rpf.AddByDefinition(d)
+        self._require_changed(feat, before, "Rectangular pattern",
+                              "every copy lies off the body; check spacing, sign and axes")
+        grid = f"{x_count} x {x_spacing:g} mm along {x_axis.upper()}" + (
+            f", {y_count} x {y_spacing:g} mm along {y_axis.upper()}" if y_count > 1 else "")
+        return f"Rectangular pattern {feat.Name}: {', '.join(names)} — {grid}{self._fmt_delta(before)}"
+
+    _ORIGIN_PLANES = {"YZ": 1, "XZ": 2, "XY": 3}
+
+    def mirror(self, features="", plane: str = "YZ", body: bool = False, remove_original: bool = False) -> str:
+        """Mirror features across an origin plane (XY / XZ / YZ) or a named work plane.
+        body=True mirrors the whole solid instead — model one half, mirror it, and the two
+        halves join; remove_original then keeps only the mirrored half (a left-hand part
+        from a right-hand one)."""
+        comp = self.active_part()
+        key = plane.strip().upper()
+        if key in self._ORIGIN_PLANES:
+            wp = comp.WorkPlanes.Item(self._ORIGIN_PLANES[key])
+        else:
+            try:
+                wp = comp.WorkPlanes.Item(plane.strip())
+            except Exception:
+                have = ", ".join(comp.WorkPlanes.Item(i).Name for i in range(1, comp.WorkPlanes.Count + 1))
+                raise ValueError(f"No work plane {plane!r}. Use XY, XZ, YZ or one of: {have}") from None
+        if body:
+            if comp.SurfaceBodies.Count == 0:
+                raise RuntimeError("There is no body to mirror yet")
+            col = self.app.TransientObjects.CreateObjectCollection()
+            col.Add(comp.SurfaceBodies.Item(1))
+            names = ["the body"]
+        else:
+            if remove_original:
+                raise ValueError("remove_original is for body=True")
+            col, names = self._features(comp, features)
+        before = self._vol_state()
+        mf = comp.Features.MirrorFeatures
+        d = mf.CreateDefinition(col, wp)
+        if body and remove_original:
+            d.RemoveOriginal = True
+        feat = mf.AddByDefinition(d)
+        if not (body and remove_original):
+            self._require_changed(feat, before, "Mirror",
+                                  "the mirrored copy lies off the body, or exactly on the original "
+                                  "(the body is already symmetric about that plane)")
+        return f"Mirror {feat.Name}: {', '.join(names)} across {wp.Name}{self._fmt_delta(before)}"
+
     # ---------- Parameters ----------
 
     def get_parameters(self) -> list[dict]:

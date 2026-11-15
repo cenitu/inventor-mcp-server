@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `add_rectangular_pattern`: features in a row or a grid along the model axes, with the pitch
+  in mm. `add_mirror`: features, or the whole body, across an origin plane or a work plane;
+  `remove_original` keeps only the mirrored side. Either one is taken back when it changes
+  nothing (every copy off the body).
 - **`check_manufacturability`** — before it goes to the shop. A sheet metal part, on its flat
   pattern: the rule against the thickness (TXX-VYY names give the V die), the flat size against
   the sheet, each flange against the die (V/2 + thickness of sheet on both sides of a bend line,
