@@ -41,3 +41,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["inventor_mcp_server*"]
+
+[tool.setuptools.package-data]
+inventor_mcp_server = ["notes/*.md"]   # served as the resource inventor://notes/api

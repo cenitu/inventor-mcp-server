@@ -399,6 +399,152 @@ proxy.write("other thread")
 check("execute_python captures only the Inventor thread's prints",
       captured.getvalue() == "inventor" and default.getvalue() == "other thread")
 
+print("Assemblies, views and drawings (fake Inventor objects):")
+
+
+def raises(fn, fragment):
+    try:
+        fn()
+    except Exception as e:
+        return fragment in str(e), str(e)[:140]
+    return False, "no error"
+
+
+class FakeMatrix:
+    """Rows of a 4x4 transform; lengths in cm like Inventor."""
+    def __init__(self, rows):
+        self.rows = rows
+
+    def Cell(self, r, c):
+        return self.rows[r - 1][c - 1]
+
+
+def fake_box(lo, hi):
+    return Fake(MinPoint=Fake(X=lo[0], Y=lo[1], Z=lo[2]), MaxPoint=Fake(X=hi[0], Y=hi[1], Z=hi[2]))
+
+
+def fake_occ(name, lo, hi, member=False):
+    return Fake(Name=name, RangeBox=fake_box(lo, hi), Definition=Fake(IsContentMember=member))
+
+
+conn = api.InventorConnection()
+# a component turned 90° about Z and moved to (100, 20, 5) mm
+turned = Fake(Transformation=FakeMatrix([[0, -1, 0, 10.0], [1, 0, 0, 2.0], [0, 0, 1, 0.5], [0, 0, 0, 1]]))
+conn._occ = lambda path: turned
+top = conn.to_top("P:1", [10, 0, 3])
+check("to_top turns and moves a component point into assembly mm", top == [100.0, 30.0, 8.0], str(top))
+check("to_local is its inverse", conn.to_local("P:1", top) == [10.0, 0.0, 3.0], str(conn.to_local("P:1", top)))
+
+# plates stacked along Z (cm): a|b touch, b|c are 0.1 mm apart, d is far away, a bolt sits in the gap
+occs = [fake_occ("a:1", (0, 0, 0), (8, 6, 1.2)), fake_occ("b:1", (0, 0, 1.2), (8, 6, 2.4)),
+        fake_occ("c:1", (0, 0, 2.41), (8, 6, 3.61)), fake_occ("d:1", (0, 0, 8), (8, 6, 9.2)),
+        fake_occ("ISO 4762 M6:1", (1, 1, 2.4), (1.6, 1.6, 2.41), member=True)]
+measured = []
+
+
+def fake_distance(x, y):
+    measured.append((x.Name, y.Name))
+    gap = max(x.RangeBox.MinPoint.Z - y.RangeBox.MaxPoint.Z, y.RangeBox.MinPoint.Z - x.RangeBox.MaxPoint.Z, 0)
+    return (gap, None)   # a tuple under pywin32: distance in cm first
+
+
+leaves = Fake(Count=len(occs), Item=lambda i: occs[i - 1])
+conn._app = Fake(ActiveDocument=Fake(DocumentType=12291, ComponentDefinition=Fake(Occurrences=Fake(AllLeafOccurrences=leaves))),
+                 MeasureTools=Fake(GetMinimumDistance=fake_distance))
+out = conn.check_clearances(0.3)
+check("clearances: only neighbours are measured, fasteners left out",
+      sorted(measured) == [("a:1", "b:1"), ("b:1", "c:1")] and out["parts"] == 4, str(measured))
+check("clearances: touching is fine, a 0.1 mm gap is reported",
+      out["touching"] == 1 and out["too_close"] == [{"a": "b:1", "b": "c:1", "gap_mm": 0.1}], str(out))
+out = conn.check_clearances(0.3, max_pairs=1)
+check("clearances: pairs left unmeasured are named", any("not measured" in n for n in out["notes"]), str(out["notes"]))
+
+# view arguments are checked before Inventor is asked for anything
+ok, why = raises(lambda: conn.view_images(["sideways"]), "Unknown view")
+check("capture_view: an unknown view is refused", ok, why)
+ok, why = raises(lambda: conn.view_images(["custom"]), "needs look_from")
+check("capture_view: the custom view needs look_from", ok, why)
+ok, why = raises(lambda: conn.view_images(["iso"], zoom=0), "zoom")
+check("capture_view: zoom must be above 0", ok, why)
+
+cam = Fake(fit=0, extents=None)
+cam.Fit = lambda: setattr(cam, "fit", cam.fit + 1)
+cam.SetExtents = lambda w, h: setattr(cam, "extents", (round(w, 3), round(h, 3)))
+conn._tg = lambda: Fake(CreatePoint=lambda *xyz: tuple(round(v, 6) for v in xyz),
+                        CreateUnitVector=lambda *xyz: tuple(xyz))
+model = fake_box((0, 0, 0), (8, 6, 1.2))
+conn._custom_view(cam, [300, 0, 5], None, "z", model)
+check("a camera from a point: mm become cm, the model's middle is the target, the model is fitted",
+      cam.Eye == (30.0, 0.0, 0.5) and cam.Target == (4.0, 3.0, 0.6) and cam.UpVector == (0.0, 0.0, 1.0)
+      and cam.fit == 1, str((cam.Eye, cam.Target, cam.UpVector, cam.fit)))
+conn._custom_view(cam, [40, 30, 500], [40, 30, 0], "z", model)
+check("looking straight along `up` takes another up vector; a target frames the picture instead of fitting",
+      cam.UpVector == (0.0, 1.0, 0.0) and cam.fit == 1 and cam.extents == (10.4, 10.4),
+      str((cam.UpVector, cam.fit, cam.extents)))
+ok, why = raises(lambda: conn._custom_view(cam, [1, 2, 3], [1, 2, 3], "z", model), "same point")
+check("a camera at its own target is refused", ok, why)
+
+# drawing arguments, also before any COM call
+part = Fake(DocumentType=12290, FullFileName=r"C:\work\plate.ipt", DisplayName="plate.ipt", ComponentDefinition=Fake())
+conn._app = Fake(ActiveDocument=part)
+for label, kwargs, fragment in (
+        ("a parts list needs an assembly", dict(parts_list=True), "for an assembly"),
+        ("balloons need an assembly", dict(balloons=True), "for an assembly"),
+        ("a vertical section and the right view can't share a place", dict(section="vertical"), "leave that view out"),
+        ("a horizontal section and the top view can't either", dict(section="horizontal:5", views="front,top"), "leave that view out"),
+        ("an unknown section direction is refused", dict(section="diagonal", views="front"), "vertical"),
+        ("a detail needs a point and a radius", dict(detail=[1, 2, 3], views="front"), "[x, y, z, radius]"),
+        ("section and detail are not for a flat pattern", dict(flat=True, section="vertical"), "folded model"),
+        ("the base view must be an orthographic one", dict(views="iso"), "first view")):
+    ok, why = raises(lambda: conn.make_drawing(r"C:\work\out.pdf", **kwargs), fragment)
+    check("create_drawing: " + label, ok, why)
+conn._app = Fake(ActiveDocument=Fake(DocumentType=12290, FullFileName="", DisplayName="Part1", ComponentDefinition=Fake()))
+ok, why = raises(lambda: conn.make_drawing(r"C:\work\out.pdf"), "Save the model first")
+check("create_drawing: an unsaved model is refused", ok, why)
+
+# features by index or name, patterns and mirrors
+feats = [Fake(Name="Extrusion1"), Fake(Name="Hole1")]
+
+
+def feature_item(key):
+    if isinstance(key, int) and 1 <= key <= len(feats):
+        return feats[key - 1]
+    return next(f for f in feats if f.Name == key)
+
+
+picked = []
+shop = Fake(Features=Fake(Count=2, Item=feature_item), SurfaceBodies=Fake(Count=1),
+            WorkAxes=Fake(Item=lambda i: Fake(Name="XYZ"[i - 1] + " Axis")),
+            WorkPlanes=Fake(Count=3, Item=lambda k: (_ for _ in ()).throw(KeyError(k)) if isinstance(k, str) else Fake(Name="YZ Plane")))
+conn._app = Fake(ActiveDocument=Fake(DocumentType=12290, ComponentDefinition=shop),
+                 TransientObjects=Fake(CreateObjectCollection=lambda: Fake(Add=picked.append)))
+col, found_names = conn._features(shop, "2, Extrusion1")
+check("features are taken by index or by name", found_names == ["Hole1", "Extrusion1"] and len(picked) == 2, str(found_names))
+ok, why = raises(lambda: conn._features(shop, "Hole9"), "[2] Hole1")
+check("an unknown feature gets the list of features", ok, why)
+for label, call, fragment in (
+        ("one instance is not a pattern", lambda: conn.rectangular_pattern("2", 1, 10), "at least 2"),
+        ("a second direction needs its spacing", lambda: conn.rectangular_pattern("2", 2, 10, "X", 3, 0), "spacing"),
+        ("the two directions must differ", lambda: conn.rectangular_pattern("2", 2, 10, "X", 2, 10, "x"), "must differ"),
+        ("an unknown mirror plane gets the choices", lambda: conn.mirror("2", plane="Middle"), "Use XY, XZ, YZ"),
+        ("remove_original is for a mirrored body", lambda: conn.mirror("2", remove_original=True), "body=True")):
+    ok, why = raises(call, fragment)
+    check("patterns and mirrors: " + label, ok, why)
+
+print("Resources:")
+listed = asyncio.run(pkg.mcp.list_resources())
+uris = sorted(str(r.uri) for r in listed)
+check("the API notes and the modelling skill are offered as resources",
+      uris == ["inventor://notes/api", "inventor://skills/modeling"], str(uris))
+got = asyncio.run(pkg.mcp.read_resource("inventor://notes/api"))
+text = "".join(getattr(c, "content", "") or "" for c in (got if isinstance(got, (list, tuple)) else [got]))
+check("inventor://notes/api returns the notes", "Tuple-returning calls" in text and len(text) > 5000, str(len(text)))
+import tomllib
+data = tomllib.load(open(os.path.join(ROOT, "pyproject.toml"), "rb"))["tool"]["setuptools"]["package-data"]
+check("the notes are shipped in the package",
+      "notes/*.md" in data.get("inventor_mcp_server", [])
+      and os.path.isfile(os.path.join(ROOT, "inventor_mcp_server", "notes", "inventor-api-notes.md")))
+
 print("Docs:")
 readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 m = re.search(r"\*\*(\d+) MCP tools\*\*", readme)

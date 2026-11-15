@@ -44,7 +44,7 @@ Register the server in your MCP client by the **absolute path** to `inventor_mcp
 | `inventor_mcp_server/server.py` | MCP tool definitions — thin wrappers that parse arguments and call the API |
 | `tests/check_server.py` | Checks that need no Inventor (runs in CI) |
 | `tests/smoke_test.py` | Live test against a real Inventor — every geometry path once |
-| `docs/inventor-api-notes.md` | Field notes on API quirks — **read this first** |
+| `inventor_mcp_server/notes/inventor-api-notes.md` | Field notes on API quirks — **read this first**. Shipped in the package and served to agents as the resource `inventor://notes/api` |
 | `skills/` | Agent Skills that teach the AI the workflow and part recipes |
 
 ## Fast iteration
@@ -65,7 +65,7 @@ degrees and convert.
 3. Return something the AI can verify. Feature operations should include the volume / topology
    delta (`self._fmt_delta(before)`), so a feature that silently did nothing is visible.
 4. Add a step to `tests/smoke_test.py`. Keep it template-agnostic (stock Inventor templates only).
-5. If you discovered an API quirk, add it to `docs/inventor-api-notes.md` — that file is the
+5. If you discovered an API quirk, add it to `inventor_mcp_server/notes/inventor-api-notes.md` — that file is the
    project's most valuable asset.
 6. Update the README tool count (CI checks it) and add a line to `CHANGELOG.md` under *Unreleased*.
 
