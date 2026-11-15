@@ -7,6 +7,12 @@
   `InventorConnection` is put together from them. Nothing changes for tools, `inv.*` in
   `execute_python`, or `from inventor_mcp_server.inventor_api import InventorConnection`;
   `reload_api` reloads every part.
+
+## 1.1.0 — 2026-11-15
+
+Eight new tools (57 → 65) and no renames: what the shop reads on a drawing, a check of whether a part
+can be made, and the modelling tools that were missing.
+
 - `add_rectangular_pattern`: features in a row or a grid along the model axes, with the pitch
   in mm. `add_mirror`: features, or the whole body, across an origin plane or a work plane;
   `remove_original` keeps only the mirrored side. Either one is taken back when it changes
@@ -37,7 +43,6 @@
 - The server imports numpy in the background when it starts, if it is installed: the first
   import took 52 s inside `load_library`. `INVENTOR_MCP_PRELOAD` names other modules
   (";"-separated; empty = none).
-
 - `shell`, `loft`, `sweep`: hollow a body leaving chosen faces open; blend between the profiles of
   two or more sketches; sweep a profile along a path sketch, with taper and twist. Each returns
   the volume / topology change.
