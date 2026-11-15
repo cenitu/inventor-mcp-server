@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Inside: the 5,500-line `inventor_api.py` is now one module per area (`api_sketch.py`,
+  `api_features.py`, `api_sheet_metal.py`, `api_assembly.py`, `api_outputs.py`, …), and
+  `InventorConnection` is put together from them. Nothing changes for tools, `inv.*` in
+  `execute_python`, or `from inventor_mcp_server.inventor_api import InventorConnection`;
+  `reload_api` reloads every part.
+
 ## 1.1.0 — 2026-11-15
 
 Eight new tools (57 → 65) and no renames: what the shop reads on a drawing, a check of whether a part

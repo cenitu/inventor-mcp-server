@@ -212,7 +212,9 @@ Inventor's COM API documentation is wrong or silent about many things in recent 
 
 ```
 inventor_mcp_server/server.py        MCP server (FastMCP / MCPServer) — tool definitions (stdio transport)
-inventor_mcp_server/inventor_api.py  InventorConnection — COM wrapper, all geometry logic (mm units)
+inventor_mcp_server/inventor_api.py  InventorConnection — COM wrapper, all geometry logic (mm units),
+inventor_mcp_server/api_*.py        … put together from one module per area (sketch, features, sheet metal,
+                                     assembly, views, outputs, library)
 skills/              Agent Skills for Claude
 docs/                Hard-won API knowledge
 ```

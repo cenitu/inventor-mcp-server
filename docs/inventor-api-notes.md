@@ -93,7 +93,7 @@ smcd = CastTo(part_doc.ComponentDefinition, "SheetMetalComponentDefinition")
 
 **The server is immune (0.4.1+).** A cache also appears when an AI session calls `CastTo` in
 `execute_python` — typed objects make it look necessary: a `Document` from `Documents.Open` is
-typed as the generic `Document` interface and hides `ComponentDefinition`. `inventor_api.py` sets
+typed as the generic `Document` interface and hides `ComponentDefinition`. `api_common.py` sets
 `win32com.client.gencache.GetClassForCLSID = lambda clsid: None` at import, so pywin32 never wraps
 anything in a gen_py class in the server process: `GetActiveObject` works with a cache present, and
 every object is late-bound *with* type info (`Item(1)` etc. still work). Two things that don't work

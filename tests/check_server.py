@@ -405,5 +405,27 @@ m = re.search(r"\*\*(\d+) MCP tools\*\*", readme)
 check("README tool count matches", bool(m) and int(m.group(1)) == len(names),
       f"README says {m.group(1) if m else '?'}, server has {len(names)}")
 
+print("The wrapper's parts (last: it reloads them):")
+import ast
+wrapper = importlib.import_module("inventor_mcp_server.inventor_api")
+defined = {}
+for part in wrapper._PARTS:
+    tree = ast.parse(open(os.path.join(ROOT, "inventor_mcp_server", part + ".py"), encoding="utf-8").read())
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        for fn in (n for n in cls.body if isinstance(n, ast.FunctionDef)):
+            defined.setdefault(fn.name, []).append(part)
+twice = {name: parts for name, parts in defined.items() if len(parts) > 1}
+check("no method is defined in two parts", not twice, str(twice))
+check("InventorConnection has every method of every part",
+      all(hasattr(wrapper.InventorConnection, name) for name in defined), str(len(defined)))
+before = wrapper.InventorConnection
+part_modules = [sys.modules["inventor_mcp_server." + part] for part in wrapper._PARTS]
+importlib.reload(wrapper)
+check("reloading the wrapper reloads every part and rebuilds the class",
+      wrapper.InventorConnection is not before
+      and all(getattr(wrapper.InventorConnection, name).__module__ != "inventor_mcp_server.inventor_api"
+              for name in ("make_drawing", "mirror", "view_images", "connect"))
+      and all(sys.modules["inventor_mcp_server." + p] is m for p, m in zip(wrapper._PARTS, part_modules)))
+
 print(f"\n{len(failed)} failed")
 sys.exit(len(failed))

@@ -38,7 +38,9 @@ Register the server in your MCP client by the **absolute path** to `inventor_mcp
 
 | Path | What lives there |
 |---|---|
-| `inventor_mcp_server/inventor_api.py` | `InventorConnection` — all COM / geometry logic, **millimetre** interface |
+| `inventor_mcp_server/inventor_api.py` | `InventorConnection` — all COM / geometry logic, **millimetre** interface. The class is put together from the `api_*.py` parts |
+| `inventor_mcp_server/api_*.py` | The parts, one per area: `api_documents`, `api_sketch`, `api_features`, `api_sheet_metal`, `api_assembly`, `api_views`, `api_outputs` (flat pattern, BOM, drawings, checks), `api_library` (Content Center, frames, vendor surfaces), `api_tools`; `api_common` holds constants and error helpers |
+| `inventor_mcp_server/flat_checks.py` | Flat pattern checks — plain 2D geometry, tested without Inventor |
 | `inventor_mcp_server/server.py` | MCP tool definitions — thin wrappers that parse arguments and call the API |
 | `tests/check_server.py` | Checks that need no Inventor (runs in CI) |
 | `tests/smoke_test.py` | Live test against a real Inventor — every geometry path once |
@@ -47,7 +49,7 @@ Register the server in your MCP client by the **absolute path** to `inventor_mcp
 
 ## Fast iteration
 
-Edit `inventor_mcp_server/inventor_api.py`, then call the **`reload_api`** tool from your MCP client — the new code
+Edit the part you need (`inventor_mcp_server/api_*.py`), then call the **`reload_api`** tool from your MCP client — the new code
 is loaded without restarting the client, and the COM connection is kept. For experiments, the
 **`execute_python`** tool runs code against the live connection (`inv`, `app`, `doc`, `comp`,
 `body`, `tg` are pre-bound).
@@ -57,7 +59,7 @@ degrees and convert.
 
 ## Adding or changing a tool
 
-1. Put the logic in `InventorConnection` (`inventor_mcp_server/inventor_api.py`), taking mm / degrees.
+1. Put the logic in the part of `InventorConnection` it belongs to (`inventor_mcp_server/api_*.py`: a method of that file's mixin class), taking mm / degrees.
 2. Add a thin `@mcp.tool()` wrapper in `inventor_mcp_server/server.py`. The docstring is what the AI reads —
    say what the tool does, the units, and when to prefer it over a similar tool.
 3. Return something the AI can verify. Feature operations should include the volume / topology
