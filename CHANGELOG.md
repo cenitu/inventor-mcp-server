@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Resources.** The API field notes are served as `inventor://notes/api` (and, from a clone,
+  the modelling skill as `inventor://skills/modeling`), so an agent can read the units, enum
+  values and silent failures before it writes `execute_python` code. The notes moved into the
+  package (`inventor_mcp_server/notes/`) so that a pip install has them too.
 - Inside: the 5,500-line `inventor_api.py` is now one module per area (`api_sketch.py`,
   `api_features.py`, `api_sheet_metal.py`, `api_assembly.py`, `api_outputs.py`, …), and
   `InventorConnection` is put together from them. Nothing changes for tools, `inv.*` in

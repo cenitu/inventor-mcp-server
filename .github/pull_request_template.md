@@ -16,5 +16,5 @@
 ## Checklist
 
 - [ ] New/changed tools have a clear docstring (units, when to use it)
-- [ ] API quirks I ran into are noted in `docs/inventor-api-notes.md`
+- [ ] API quirks I ran into are noted in `inventor_mcp_server/notes/inventor-api-notes.md`
 - [ ] README tool count and `CHANGELOG.md` (*Unreleased*) updated

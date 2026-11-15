@@ -399,6 +399,20 @@ proxy.write("other thread")
 check("execute_python captures only the Inventor thread's prints",
       captured.getvalue() == "inventor" and default.getvalue() == "other thread")
 
+print("Resources:")
+listed = asyncio.run(pkg.mcp.list_resources())
+uris = sorted(str(r.uri) for r in listed)
+check("the API notes and the modelling skill are offered as resources",
+      uris == ["inventor://notes/api", "inventor://skills/modeling"], str(uris))
+got = asyncio.run(pkg.mcp.read_resource("inventor://notes/api"))
+text = "".join(getattr(c, "content", "") or "" for c in (got if isinstance(got, (list, tuple)) else [got]))
+check("inventor://notes/api returns the notes", "Tuple-returning calls" in text and len(text) > 5000, str(len(text)))
+import tomllib
+data = tomllib.load(open(os.path.join(ROOT, "pyproject.toml"), "rb"))["tool"]["setuptools"]["package-data"]
+check("the notes are shipped in the package",
+      "notes/*.md" in data.get("inventor_mcp_server", [])
+      and os.path.isfile(os.path.join(ROOT, "inventor_mcp_server", "notes", "inventor-api-notes.md")))
+
 print("Docs:")
 readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 m = re.search(r"\*\*(\d+) MCP tools\*\*", readme)

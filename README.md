@@ -55,7 +55,7 @@ Claude: creates sketch → hexagon → extrude → tapped M16×2 hole →
 
 ## Requirements
 
-- Windows with **Autodesk Inventor** (developed on Inventor 2026, also verified on **Inventor 2027**; older versions may need enum adjustments — see [docs/inventor-api-notes.md](docs/inventor-api-notes.md))
+- Windows with **Autodesk Inventor** (developed on Inventor 2026, also verified on **Inventor 2027**; older versions may need enum adjustments — see [the API field notes](inventor_mcp_server/notes/inventor-api-notes.md))
 - **Python 3.12+**
 - `pip install "mcp[cli]" pywin32` — MCP Python SDK **1.x and 2.x** are both supported (2.x renamed `FastMCP` to `MCPServer`; the server detects which is installed)
 - An MCP client — used daily with **Claude Code** and **Claude Desktop** (several agents at once, see below)
@@ -206,7 +206,7 @@ Inventor's COM API documentation is wrong or silent about many things in recent 
 - Sheet-metal `FlangeDefinition`: the Distance argument is **silently ignored**; the real height is set via `feature.Definition.HeightExtent.Distance.Expression` (and the angle is in radians — pass `90` and you get 5156°)
 - `CreateLinearPlacementDefinition` requires a `BiasPoint` argument that dynamic dispatch won't tell you about
 - Edge indices renumber after every feature; fillets shift adjacent edges
-- …and more in [docs/inventor-api-notes.md](docs/inventor-api-notes.md)
+- …and more in [the API field notes](inventor_mcp_server/notes/inventor-api-notes.md)
 
 ## Architecture
 
@@ -216,7 +216,7 @@ inventor_mcp_server/inventor_api.py  InventorConnection — COM wrapper, all geo
 inventor_mcp_server/api_*.py        … put together from one module per area (sketch, features, sheet metal,
                                      assembly, views, outputs, library)
 skills/              Agent Skills for Claude
-docs/                Hard-won API knowledge
+inventor_mcp_server/notes/          Hard-won API knowledge, served as the resource inventor://notes/api
 ```
 
 ## Contributing

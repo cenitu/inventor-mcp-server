@@ -45,12 +45,44 @@ mcp = FastMCP(
         "For anything not covered by a dedicated tool, use execute_python "
         "(persistent namespace, live inv/app/comp/body/tg objects). "
         "After editing the wrapper (inventor_mcp_server/api_*.py) on disk, call reload_api — no server restart needed. "
+        "Before writing execute_python code against the COM API, read the resource inventor://notes/api "
+        "(units, enum values, calls that fail silently, what returns a tuple). "
         "Working in a project: connect(project=<.ipj path>) — the server reuses the Inventor that "
         "has it or starts a separate one, so several agents on several projects each get their own. "
         "When several Inventors are connected, pass the instance name connect returned to every "
         "call. list_instances shows them."
     ),
 )
+
+# ---------- Resources: what an agent should read before it drives the COM API itself ----------
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _read(*parts) -> str:
+    with open(os.path.join(_HERE, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+@mcp.resource("inventor://notes/api", name="Inventor API field notes", mime_type="text/markdown",
+              description="Quirks of the Inventor COM API met while building this server: units (cm, radians), "
+                          "enum values, calls that fail without an error, out-parameters that come back as "
+                          "tuples, sheet metal, assemblies, drawings. Read before writing execute_python code.")
+def api_notes() -> str:
+    return _read("notes", "inventor-api-notes.md")
+
+
+# The modelling skill lives beside the package in a clone (skills/ is what skill installers
+# copy); a pip install has no such folder, and then the resource is not offered.
+_SKILL = os.path.join(os.path.dirname(_HERE), "skills", "inventor-modeling", "SKILL.md")
+if os.path.isfile(_SKILL):
+    @mcp.resource("inventor://skills/modeling", name="Inventor modelling workflow", mime_type="text/markdown",
+                  description="How to model with this server step by step: workflow, checks after each "
+                              "feature, sheet metal and assembly recipes, common mistakes.")
+    def modeling_skill() -> str:
+        with open(_SKILL, encoding="utf-8") as f:
+            return f.read()
+
 
 class _ThreadStdout:
     """sys.stdout that sends the Inventor thread's prints to execute_python's buffer.
