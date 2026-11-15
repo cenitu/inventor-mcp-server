@@ -7,7 +7,7 @@ description: Build parametric 3D parts in Autodesk Inventor 2026 via the project
 
 ## When this skill applies
 
-Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_document`, `extrude`, `revolve`, `add_hole`, `chamfer`, `fillet`, `add_circular_pattern`, etc. Also any direct Python work against `src/inventor_api.py` in `the inventor-mcp project root\`.
+Any task involving the inventor-mcp server: `mcp__inventor__connect`, `create_document`, `extrude`, `revolve`, `add_hole`, `chamfer`, `fillet`, `add_circular_pattern`, etc. Also any direct Python work against `inventor_mcp_server/inventor_api.py` in `the inventor-mcp project root\`.
 
 Keep explanations concrete; the result that matters is the model in Inventor, not the code.
 
@@ -18,7 +18,7 @@ The MCP server has power tools that replace ad-hoc console scripts:
 - **`execute_python(code)`** — runs Python against live `inv`/`app`/`doc`/`comp`/`body`/`tg`
   objects with a persistent namespace and auto-connect. Use this instead of
   `python -c "..."` console scripts with 10 lines of import boilerplate.
-- **`reload_api()`** — hot-reloads `inventor_api.py` after editing it. No Claude Code
+- **`reload_api()`** — hot-reloads the wrapper (`inventor_api.py` and its `api_*.py` parts) after editing it. No Claude Code
   restart needed (new TOOL schemas still need a restart; new wrapper METHODS don't —
   call them via `execute_python`).
 - **`inspect_model()`** — one-call snapshot of a part or assembly.
@@ -470,7 +470,7 @@ Designation format: **integer pitches drop the decimal** — `M16x2` not `M16x2.
 | | Path |
 |---|---|
 | MCP server | `inventor_mcp_server/server.py` |
-| API wrapper | `inventor_mcp_server/inventor_api.py` |
+| API wrapper | `inventor_mcp_server/inventor_api.py` (the class) + `inventor_mcp_server/api_*.py` (its methods, by area) |
 
 | Templates | `app.FileLocations.TemplatesPath` (auto-resolved) |
 | Thread DB | `C:\Users\Public\Documents\Autodesk\Inventor 2026\Design Data\XLS\en-US\thread.xlsx` |
@@ -486,7 +486,7 @@ Designation format: **integer pitches drop the decimal** — `M16x2` not `M16x2.
 
 ## MCP server restart caveat
 
-After editing `inventor_api.py` or `server.py`, the **running MCP server still uses the old code** (Python loads modules on startup). Either restart Claude Code, or run the script via plain `python -X utf8 my_script.py` — direct Python imports the latest module file.
+After editing the wrapper (`api_*.py`) or `server.py`, the **running MCP server still uses the old code** (Python loads modules on startup). Either restart Claude Code, or run the script via plain `python -X utf8 my_script.py` — direct Python imports the latest module file.
 
 The `mcp__inventor__*` tools will return outputs in the OLD format string until restart, even though the underlying logic may have changed.
 

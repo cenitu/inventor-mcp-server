@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Inside: the 5,500-line `inventor_api.py` is now one module per area (`api_sketch.py`,
+  `api_features.py`, `api_sheet_metal.py`, `api_assembly.py`, `api_outputs.py`, …), and
+  `InventorConnection` is put together from them. Nothing changes for tools, `inv.*` in
+  `execute_python`, or `from inventor_mcp_server.inventor_api import InventorConnection`;
+  `reload_api` reloads every part.
 - `add_rectangular_pattern`: features in a row or a grid along the model axes, with the pitch
   in mm. `add_mirror`: features, or the whole body, across an origin plane or a work plane;
   `remove_original` keeps only the mirrored side. Either one is taken back when it changes

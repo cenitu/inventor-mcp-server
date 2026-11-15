@@ -44,7 +44,7 @@ mcp = FastMCP(
         "→ constrain by origin geometry / constrain(kind='insert') for bolt-in-hole. "
         "For anything not covered by a dedicated tool, use execute_python "
         "(persistent namespace, live inv/app/comp/body/tg objects). "
-        "After editing inventor_api.py on disk, call reload_api — no server restart needed. "
+        "After editing the wrapper (inventor_mcp_server/api_*.py) on disk, call reload_api — no server restart needed. "
         "Working in a project: connect(project=<.ipj path>) — the server reuses the Inventor that "
         "has it or starts a separate one, so several agents on several projects each get their own. "
         "When several Inventors are connected, pass the instance name connect returned to every "
@@ -768,7 +768,7 @@ def load_library(path: str) -> str:
 
 @tool()
 def reload_api() -> str:
-    """Hot-reload inventor_api.py from disk. Use after editing the wrapper —
+    """Hot-reload the wrapper (inventor_api.py and its api_*.py parts) from disk. Use after editing it —
     no Claude Code restart needed. Keeps the COM connections; clears this Inventor's
     execute_python namespace."""
     import importlib
@@ -780,7 +780,7 @@ def reload_api() -> str:
     me.ns.clear()
     me.ns_created = time.time()
     me.ns_ready = False  # startup file and load_library files run again
-    return "inventor_api.py reloaded (connections preserved)"
+    return "inventor_api.py and its parts reloaded (connections preserved)"
 
 
 @tool()
