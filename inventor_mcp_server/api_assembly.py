@@ -856,8 +856,20 @@ class AssemblyMixin:
         self.active_document().Update()
         return f"Deleted constraint: {name} ({comp.Constraints.Count} left)"
 
+    @staticmethod
+    def _occurrence_file(occ) -> str:
+        """Full file name of what an occurrence places ('' for a virtual component)."""
+        try:
+            return occ.ReferencedDocumentDescriptor.FullDocumentName
+        except Exception:
+            try:
+                return occ.Definition.Document.FullFileName
+            except Exception:
+                return ""
+
     def assembly_info(self) -> dict:
-        """Snapshot of the active assembly: components, constraints, mass, bbox."""
+        """Snapshot of the active assembly: its components with their files, how many parts
+        it holds in all and how many different ones, constraints, mass."""
         doc = self.active_document()
         if doc.DocumentType != kAssemblyDocumentObject:
             raise RuntimeError("Active document is not an assembly.")
@@ -871,12 +883,34 @@ class AssemblyMixin:
         for i in range(1, comp.Occurrences.Count + 1):
             occ = comp.Occurrences.Item(i)
             t = occ.Transformation.Translation
-            info["components"].append({
+            row = {
                 "index": i,
                 "name": occ.Name,
                 "position_mm": [round(t.X * 10, 3), round(t.Y * 10, 3), round(t.Z * 10, 3)],
                 "grounded": bool(occ.Grounded),
-            })
+            }
+            path = self._occurrence_file(occ)
+            if path:
+                row["file"] = os.path.basename(path)
+            try:
+                if occ.DefinitionDocumentType == kAssemblyDocumentObject:
+                    row["sub_assembly_parts"] = occ.Definition.Occurrences.AllLeafOccurrences.Count
+            except Exception:
+                pass
+            info["components"].append(row)
+        # every part at any depth, and how often each file is used
+        try:
+            leaves = comp.Occurrences.AllLeafOccurrences
+            uses = {}
+            for i in range(1, leaves.Count + 1):
+                key = self._occurrence_file(leaves.Item(i)) or leaves.Item(i).Name
+                uses[key] = uses.get(key, 0) + 1
+            info["parts_total"] = leaves.Count
+            info["parts_different"] = len(uses)
+            top = sorted(uses.items(), key=lambda kv: (-kv[1], kv[0]))
+            info["most_used"] = [{"file": os.path.basename(f), "count": n} for f, n in top[:15] if n > 1]
+        except Exception:
+            pass
         try:
             mp = self._fresh_mass(doc, comp)
             info["mass_kg"] = round(mp.Mass, 4)

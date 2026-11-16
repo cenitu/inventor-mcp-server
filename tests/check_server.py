@@ -17,6 +17,7 @@ against a real Inventor.
 import asyncio
 import importlib
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -70,10 +71,17 @@ schema = getattr(flange, "input_schema", None) or getattr(flange, "inputSchema",
 check("wrapped tools keep their parameters",
       {"edge_indices", "distance", "auto_miter"} <= set(schema.get("properties", {})))
 
+read_only = sorted(t.name for t in pkg_tools if t.annotations and t.annotations.readOnlyHint)
+check("the tools that only look are marked read-only, and no tool that changes something is",
+      read_only == ["capture_view", "check_interference", "check_sketch", "find_edges", "find_faces", "get_status",
+                    "inspect_model", "list_instances", "measure_distance"], str(read_only))
+
 print("Inventor thread (no Inventor needed):")
 import threading, time
 srv = pkg
 srv.CALL_TIMEOUT = 0.5
+import tempfile as _tempfile
+srv.CALLS_DIR = _tempfile.mkdtemp(prefix="inventor_mcp_calls_")   # not the user's ~/.inventor-mcp
 gate = threading.Event()
 A = srv._instances[srv.DEFAULT]
 
@@ -98,6 +106,9 @@ out = srv._on_com_thread(A, quick_job, (), {})
 check("calls run on the Inventor thread", out.startswith("inventor-default"), out)
 out = srv._on_com_thread(A, slow_job, (), {})
 check("a long call returns before the client times out", "keeps running" in out, out.splitlines()[0])
+result_file = A.last_call.result_file
+check("…and says where its result will be written",
+      result_file.startswith(srv.CALLS_DIR) and result_file in out and not os.path.exists(result_file), result_file)
 out = srv._on_com_thread(A, quick_job, (), {})
 check("the next call is refused while one is running", "NOT started" in out)
 status = lambda **kw: asyncio.run(srv.call_status(**kw))
@@ -109,6 +120,47 @@ took = time.monotonic() - t
 check("call_status(wait_seconds) returns as soon as the call finishes",
       "slow job done" in out and took < 3, f"{took:.2f} s")
 check("…only once", "already returned" in status())
+for _ in range(40):          # the file is written by the call's done-callback
+    if os.path.exists(result_file):
+        break
+    time.sleep(0.05)
+record = json.load(open(result_file, encoding="utf-8")) if os.path.exists(result_file) else {}
+check("the long call's result is also on disk, for when manage_call can't be reached",
+      record.get("result") == "slow job done" and record.get("status") == "finished"
+      and record.get("call") == "slow_job" and record.get("seconds", 0) > 0, str(record))
+n_files = len(os.listdir(srv.CALLS_DIR))
+srv._on_com_thread(A, quick_job, (), {})
+check("a call that answered in time writes no file", len(os.listdir(srv.CALLS_DIR)) == n_files)
+
+
+def failing_job():
+    gate2.wait(5)
+    raise ValueError("no such face")
+
+
+gate2 = threading.Event()
+srv._on_com_thread(A, failing_job, (), {})
+failed_file = A.last_call.result_file
+gate2.set()
+wait_done(A)
+for _ in range(40):
+    if os.path.exists(failed_file):
+        break
+    time.sleep(0.05)
+record = json.load(open(failed_file, encoding="utf-8")) if os.path.exists(failed_file) else {}
+check("a long call that fails leaves its error on disk",
+      record.get("status") == "error" and "no such face" in str(record.get("result")), str(record))
+status()   # collect it, so the next sections start clean
+
+eta_call = srv._Call("job")
+eta_call.started = time.monotonic() - 30
+srv._local.call = eta_call
+srv._progress(25, 100)
+check("progress(done, total) gives the time left", eta_call.progress[1] == "25 of 100"
+      and "about 9" in srv._eta(eta_call) and "s left" in srv._live_report(eta_call), srv._live_report(eta_call).strip())
+srv._progress("placing bolts")
+check("progress(text) still works", eta_call.progress[1] == "placing bolts")
+srv._local.call = None
 
 print("Several Inventors (no Inventor needed):")
 com_tools = [t for t in pkg_tools if t.name not in ("manage_call", "list_instances")]
