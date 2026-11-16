@@ -71,7 +71,8 @@ schema = getattr(flange, "input_schema", None) or getattr(flange, "inputSchema",
 check("wrapped tools keep their parameters",
       {"edge_indices", "distance", "auto_miter"} <= set(schema.get("properties", {})))
 
-read_only = sorted(t.name for t in pkg_tools if t.annotations and t.annotations.readOnlyHint)
+read_only = sorted(t.name for t in pkg_tools   # by wire name: the attribute differs between SDK 1.x and 2.x
+                   if t.annotations and t.annotations.model_dump(by_alias=True).get("readOnlyHint"))
 check("the tools that only look are marked read-only, and no tool that changes something is",
       read_only == ["capture_view", "check_interference", "check_sketch", "find_edges", "find_faces", "get_status",
                     "inspect_model", "list_instances", "measure_distance"], str(read_only))

@@ -494,7 +494,9 @@ def _register(fn, read_only: bool):
     if read_only:
         try:
             from mcp.types import ToolAnnotations
-            return mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))(fn)
+            # by wire name: the field is readOnlyHint in SDK 1.x and read_only_hint in 2.x
+            hints = ToolAnnotations.model_validate({"readOnlyHint": True, "openWorldHint": False})
+            return mcp.tool(annotations=hints)(fn)
         except (ImportError, TypeError):  # an SDK without tool annotations
             pass
     return mcp.tool()(fn)
