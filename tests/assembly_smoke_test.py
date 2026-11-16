@@ -168,6 +168,33 @@ def assembly_tests(inv, run, plate, pin):
         return out
     run.step("replace_occurrence keeps the constraint, archives the old file", replace)
 
+    def hole_alignment():
+        # a second plate on top of the first: their Ø10 holes on each other, then 2 mm off
+        inv.place_component(plate, 0, 0, 10)
+        try:
+            inv.save_document(os.path.join(os.path.dirname(pin), "smoke_asm.iam"), overwrite=True)
+            out = inv.fastener_alignment(parts=["smoke_plate*"], refresh=True)
+            if out["aligned"] < 1 or out["misaligned_count"] or "Ø10 on Ø10 (M10)" not in out["aligned_by_size"]:
+                _raise(str(out))
+            again = inv.fastener_alignment(parts=["smoke_plate*"])
+            if again["read"]["from_cache"] < 1:
+                _raise("nothing came from the cache: " + str(again["read"]))
+            occ = inv._occ("smoke_plate:2")
+            tg = inv.app.TransientGeometry
+            move = tg.CreateMatrix()
+            move.SetTranslation(tg.CreateVector(0.2, 0, 1.0))   # cm: 2 mm in X, still 10 mm up
+            occ.Transformation = move
+            off = inv.fastener_alignment(parts=["smoke_plate*"])
+            rows = [r for r in off["misaligned"] if r["a_opening"] == "Ø10" and r["b_opening"] == "Ø10"]
+            if not rows or abs(rows[0]["offset_mm"] - 2.0) > 0.01 or rows[0]["passes"] != "M8":
+                _raise(str(off))
+            if any(d.Dirty and d.DisplayName.startswith("smoke_plate") for d in inv.app.Documents):
+                _raise("reading the geometry marked the part as changed")
+            return f"aligned {out['aligned_by_size']}; 2 mm off: {rows[0]['passes']} still passes; {again['read']}"
+        finally:
+            inv.delete_occurrence("smoke_plate:2", force=True)
+    run.step("fastener_alignment: aligned, cached, then 2 mm off", hole_alignment)
+
     def deeper_info():
         info = inv.assembly_info()
         files = [c.get("file") for c in info["components"]]

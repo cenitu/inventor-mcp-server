@@ -43,4 +43,5 @@ where = ["."]
 include = ["inventor_mcp_server*"]
 
 [tool.setuptools.package-data]
-inventor_mcp_server = ["notes/*.md"]   # served as the resource inventor://notes/api
+# notes: served as the resource inventor://notes/api; rules: run inside Inventor by api_scan.py
+inventor_mcp_server = ["notes/*.md", "rules/*.iLogicVb"]

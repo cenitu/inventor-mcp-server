@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`check_fastener_alignment`** — do the holes and slots of parts that lie on each other line up?
+  For every opening in a face that lies on another part: aligned, misaligned (by how much, and the
+  largest bolt that still passes), engaged (a pin or stud of the other part goes into it — or does
+  not fit), blocked (solid material behind) or open (nothing behind).
+  On a 396-part assembly: 4 to 9 s the first time, 1.4 s after. Checked against Inventor's own ray
+  query on that assembly: 116 of 120 sampled rows agree; the other four are holes with a part
+  behind them that is not flat there. Only flat faces are compared.
+- **Geometry is read inside Inventor.** Scanning faces through COM from Python cost about 6 ms a
+  face (a 174-face part: 19.8 s); the same scan as an iLogic rule takes 0.1 s. The rule ships in
+  the package (`rules/`), needs nothing installed, and its result is kept per file on disk
+  (`~/.inventor-mcp/scan`, `INVENTOR_MCP_SCAN_CACHE`) until the file changes.
 - Read-only tools carry `readOnlyHint` (`get_status`, `list_instances`, `inspect_model`, `find_faces`,
   `find_edges`, `check_sketch`, `check_interference`, `measure_distance`, `capture_view`).
 - The result of a call that outlived the wait is also written as JSON under `~/.inventor-mcp/calls`

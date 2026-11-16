@@ -1,0 +1,250 @@
+' Planar faces and their openings, read inside Inventor.
+'
+' Run by inventor_mcp_server/api_scan.py through the iLogic add-in, because the same scan
+' through COM from Python takes about 190 times as long. Nothing in any document is changed.
+'
+' The result is JSON, handed back in the argument "result". The rule writes no file and
+' starts nothing: iLogic's Security Alert stops a rule that does (System.IO and the like),
+' and under SilentOperation that alert would hold the call until someone clicks it.
+'
+' Arguments:
+'   files  optional: full file names of the parts to scan, separated by "|".
+'          Absent = every part; present but empty = none (only the walk below).
+'   walk   optional, "1": for an assembly also list every part occurrence with its transform.
+'
+' Lengths are written in mm, in each part's own coordinates. Version: see VERSION below;
+' api_scan.py refuses a cache written by another version.
+
+Sub Main()
+    Dim sb As New System.Text.StringBuilder()
+    Try
+        Dim sw As System.Diagnostics.Stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        Dim doc As Inventor.Document = ThisDoc.Document
+        Dim all As Boolean = True
+        Dim want As New System.Collections.Generic.HashSet(Of String)(System.StringComparer.OrdinalIgnoreCase)
+        If RuleArguments.Exists("files") Then
+            all = False
+            For Each s As String In CStr(RuleArguments("files")).Split("|"c)
+                If s.Length > 0 Then want.Add(s)
+            Next
+        End If
+
+        Dim docs As New System.Collections.Generic.List(Of Inventor.Document)
+        If doc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+            docs.Add(doc)
+        Else
+            For Each d As Inventor.Document In doc.AllReferencedDocuments
+                docs.Add(d)
+            Next
+        End If
+
+        sb.Append("{""version"":1,""documents"":{")
+        Dim firstDoc As Boolean = True
+        For Each d As Inventor.Document In docs
+            If d.DocumentType <> DocumentTypeEnum.kPartDocumentObject Then Continue For
+            If Not firstDoc Then sb.Append(",")
+            firstDoc = False
+            Dim content As Boolean = False
+            Try
+                content = d.ComponentDefinition.IsContentMember
+            Catch
+            End Try
+            sb.Append(Q(d.FullFileName)).Append(":{""dirty"":").Append(B(d.Dirty)).Append(",""content"":").Append(B(content)).Append("}")
+        Next
+
+        sb.Append("},""parts"":{")
+        Dim firstPart As Boolean = True
+        For Each d As Inventor.Document In docs
+            If d.DocumentType <> DocumentTypeEnum.kPartDocumentObject Then Continue For
+            If Not all AndAlso Not want.Contains(d.FullFileName) Then Continue For
+            If Not firstPart Then sb.Append(",")
+            firstPart = False
+            sb.Append(Q(d.FullFileName)).Append(":")
+            AppendPart(sb, d)
+        Next
+        sb.Append("}")
+
+        If doc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject AndAlso RuleArguments.Exists("walk") Then
+            sb.Append(",""occurrences"":[")
+            Dim firstOcc As Boolean = True
+            Dim asm As AssemblyDocument = doc
+            For Each o As ComponentOccurrence In asm.ComponentDefinition.Occurrences.AllLeafOccurrences
+                Try
+                    Dim file As String = o.ReferencedDocumentDescriptor.FullDocumentName
+                    Dim m As Matrix = o.Transformation
+                    Dim path As String = ""
+                    For Each link As ComponentOccurrence In o.OccurrencePath
+                        If path.Length > 0 Then path &= "/"
+                        path &= link.Name
+                    Next
+                    Dim row As New System.Text.StringBuilder()
+                    row.Append("{""path"":").Append(Q(path)).Append(",""file"":").Append(Q(file))
+                    row.Append(",""visible"":").Append(B(o.Visible)).Append(",""m"":[")
+                    For r As Integer = 1 To 3
+                        For c As Integer = 1 To 4
+                            If r > 1 OrElse c > 1 Then row.Append(",")
+                            row.Append(N(If(c = 4, m.Cell(r, c) * 10, m.Cell(r, c))))
+                        Next
+                    Next
+                    row.Append("]}")
+                    If Not firstOcc Then sb.Append(",")
+                    firstOcc = False
+                    sb.Append(row.ToString())
+                Catch
+                    ' a suppressed or unresolved occurrence has no geometry to offer
+                End Try
+            Next
+            sb.Append("]")
+        End If
+
+        sw.Stop()
+        sb.Append(",""seconds"":").Append(N(sw.Elapsed.TotalSeconds)).Append("}")
+    Catch ex As Exception
+        sb.Clear()
+        sb.Append("{""error"":").Append(Q(ex.ToString())).Append("}")
+    End Try
+    RuleArguments.Arguments.Value("result") = sb.ToString()
+End Sub
+
+Sub AppendPart(sb As System.Text.StringBuilder, d As Inventor.Document)
+    Dim part As PartDocument = d
+    sb.Append("{""faces"":[")
+    Dim firstFace As Boolean = True
+    Dim skipped As Integer = 0
+    For Each body As SurfaceBody In part.ComponentDefinition.SurfaceBodies
+        For Each f As Face In body.Faces
+            If f.SurfaceType <> SurfaceTypeEnum.kPlaneSurface Then Continue For
+            Try
+                Dim one As New System.Text.StringBuilder()
+                Dim pt As Inventor.Point = f.PointOnFace
+                Dim p(2) As Double
+                p(0) = pt.X : p(1) = pt.Y : p(2) = pt.Z
+                Dim nrm(2) As Double
+                f.Evaluator.GetNormalAtPoint(p, nrm)
+                one.Append("{""p"":[").Append(N(p(0) * 10)).Append(",").Append(N(p(1) * 10)).Append(",").Append(N(p(2) * 10))
+                one.Append("],""n"":[").Append(N(nrm(0))).Append(",").Append(N(nrm(1))).Append(",").Append(N(nrm(2)))
+                one.Append("],""area"":").Append(N(f.Evaluator.Area * 100)).Append(",""loops"":[")
+                Dim firstLoop As Boolean = True
+                For Each lp As EdgeLoop In f.EdgeLoops
+                    If Not firstLoop Then one.Append(",")
+                    firstLoop = False
+                    one.Append("{""outer"":").Append(B(lp.IsOuterEdgeLoop))
+                    If Not lp.IsOuterEdgeLoop Then one.Append(",""hole"":").Append(B(IsHole(body, f, lp, nrm)))
+                    one.Append(",""edges"":[")
+                    Dim firstEdge As Boolean = True
+                    For Each e As Edge In lp.Edges
+                        If Not firstEdge Then one.Append(",")
+                        firstEdge = False
+                        AppendEdge(one, e)
+                    Next
+                    one.Append("]}")
+                Next
+                one.Append("]}")
+                If Not firstFace Then sb.Append(",")
+                firstFace = False
+                sb.Append(one.ToString())
+            Catch
+                skipped += 1
+            End Try
+        Next
+    Next
+    sb.Append("],""skipped"":").Append(skipped.ToString()).Append("}")
+End Sub
+
+' An inner loop of a face is where the face stops: around a hole, or around something that
+' stands on the face (a boss, a welded stud, an embossed form). Take two points just under the
+' face, one on each side of the loop's wall: around a hole one of them is in the air; under
+' the foot of a boss both are in the solid. (Both sides, because the wall's normal is not
+' always the outward one: a blind hole made by a Hole feature came back with it reversed.)
+Function IsHole(body As SurfaceBody, f As Face, lp As EdgeLoop, nrm() As Double) As Boolean
+    Const D As Double = 0.005   ' cm
+    For Each e As Edge In lp.Edges
+        Try
+            Dim wall As Face = Nothing
+            For Each other As Face In e.Faces
+                If Not other Is f Then wall = other
+            Next
+            If wall Is Nothing Then Continue For
+            Dim m As Inventor.Point = e.PointOnEdge
+            Dim p(2) As Double
+            p(0) = m.X : p(1) = m.Y : p(2) = m.Z
+            Dim wn(2) As Double
+            wall.Evaluator.GetNormalAtPoint(p, wn)
+            Dim q1(2) As Double
+            Dim q2(2) As Double
+            For i As Integer = 0 To 2
+                q1(i) = p(i) + wn(i) * D - nrm(i) * D
+                q2(i) = p(i) - wn(i) * D - nrm(i) * D
+            Next
+            Return Not (body.IsPointInside(q1, False) = ContainmentEnum.kInsideContainment _
+                        AndAlso body.IsPointInside(q2, False) = ContainmentEnum.kInsideContainment)
+        Catch
+        End Try
+    Next
+    Return True
+End Function
+
+' One edge: "k" is l (line), c (full circle), a (arc) or o (anything else);
+' circles and arcs carry centre and radius; arcs and others carry stroked points.
+Sub AppendEdge(sb As System.Text.StringBuilder, e As Edge)
+    Select Case e.GeometryType
+        Case CurveTypeEnum.kLineSegmentCurve
+            sb.Append("{""k"":""l"",""pts"":[").Append(P(e.StartVertex.Point)).Append(",").Append(P(e.StopVertex.Point)).Append("]}")
+        Case CurveTypeEnum.kCircleCurve
+            Dim c As Inventor.Circle = e.Geometry
+            sb.Append("{""k"":""c"",""c"":").Append(P(c.Center)).Append(",""r"":").Append(N(c.Radius * 10)).Append("}")
+        Case CurveTypeEnum.kCircularArcCurve
+            Dim a As Inventor.Arc3d = e.Geometry
+            sb.Append("{""k"":""a"",""c"":").Append(P(a.Center)).Append(",""r"":").Append(N(a.Radius * 10))
+            sb.Append(",""pts"":").Append(Strokes(e)).Append("}")
+        Case Else
+            sb.Append("{""k"":""o"",""pts"":").Append(Strokes(e)).Append("}")
+    End Select
+End Sub
+
+Function Strokes(e As Edge) As String
+    Dim vertexCount As Integer = 0
+    Dim segmentCount As Integer = 0
+    Dim coords() As Double = {}
+    Dim indices() As Integer = {}
+    e.CalculateStrokes(0.005, vertexCount, segmentCount, coords, indices)   ' 0.05 mm chord
+    Dim sb As New System.Text.StringBuilder("[")
+    For i As Integer = 0 To vertexCount - 1
+        If i > 0 Then sb.Append(",")
+        sb.Append("[").Append(N(coords(i * 3) * 10)).Append(",").Append(N(coords(i * 3 + 1) * 10)).Append(",").Append(N(coords(i * 3 + 2) * 10)).Append("]")
+    Next
+    sb.Append("]")
+    Return sb.ToString()
+End Function
+
+Function P(pt As Inventor.Point) As String
+    Return "[" & N(pt.X * 10) & "," & N(pt.Y * 10) & "," & N(pt.Z * 10) & "]"
+End Function
+
+Function N(v As Double) As String
+    Return System.Math.Round(v, 5).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+End Function
+
+Function B(v As Boolean) As String
+    Return If(v, "true", "false")
+End Function
+
+Function Q(s As String) As String
+    Dim sb As New System.Text.StringBuilder("""")
+    For Each ch As Char In s
+        Select Case ch
+            Case """"c
+                sb.Append("\""")
+            Case "\"c
+                sb.Append("\\")
+            Case Else
+                If AscW(ch) < 32 Then
+                    sb.Append("\u" & AscW(ch).ToString("x4"))
+                Else
+                    sb.Append(ch)
+                End If
+        End Select
+    Next
+    sb.Append("""")
+    Return sb.ToString()
+End Function

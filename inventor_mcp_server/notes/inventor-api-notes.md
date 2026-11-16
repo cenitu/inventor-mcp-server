@@ -597,6 +597,40 @@ Out-parameters come back as a tuple under pywin32 dynamic dispatch:
   faces (planar and cylindrical ones are tight). Don't use it for exact sizes; measure
   with `MeasureTools` or evaluate the surface.
 
+## Speed: where the time goes, and running code inside Inventor
+
+Measured on Inventor 2027.1, a 174-face part, every face, loop and edge read once:
+
+| How | Time |
+|---|---|
+| pywin32 wrapper objects (`body.Faces.Item(i).SurfaceType` …) | 19.8 s |
+| raw `IDispatch` (`obj._oleobj_.Invoke(dispid, …)`, dispids looked up once per type) | 2.4 s |
+| the same, with `app.ScreenUpdating = False` | 1.8 s |
+| an iLogic rule inside Inventor | 0.1 s |
+
+- **Most of the wrapper's time is not the call.** A call across the process boundary costs
+  about 0.6 ms. pywin32's dynamic dispatch adds about 5 ms per object it is handed: it asks
+  the object for its type description (`GetTypeInfo`, `GetTypeAttr`, `ITypeComp.Bind`), and
+  those questions cross the process boundary too. Nothing is cached between objects.
+- **Running a rule:** `addin = app.ApplicationAddIns.ItemById("{3BDD8D79-2179-4B11-8A5A-257B1C0263AC}")`
+  (iLogic), `addin.Automation.RunExternalRuleWithArguments(doc, rule_path, name_value_map)`.
+  The first run compiles the rule (about 2 s), later runs start in 0.1 s.
+- **Hand the result back in the arguments**, not in a file:
+  `RuleArguments.Arguments.Value("result") = text` in the rule, `args.Item("result")` after the
+  call. A rule that uses `System.IO` gets iLogic's **Security Alert** ("Run the rule / Don't run
+  the rule"), and under `SilentOperation` that dialog holds the call until someone clicks it.
+- A rule does not mark the document dirty by reading it.
+- **An inner loop of a face is not always a hole.** It also runs around whatever stands on
+  the face: a locating pin, a welded stud, an embossed form. To tell them apart, take two
+  points just under the face, one on each side of the loop's wall
+  (`body.IsPointInside(point, False)`): around a hole one is in the air, under a boss both
+  are in the solid. Use both sides — `Evaluator.GetNormalAtPoint` of the wall is not always
+  the outward normal (reversed on a blind hole made by a Hole feature), while for planar
+  faces it was outward on every face checked (143 of 143).
+- **A ray that starts inside a solid** (`FindUsingRay`) reports where it leaves it, which
+  reads like "nothing for 6 mm, then material": check the start point first.
+- `For Each … Step` — `Step` is a VB keyword; don't name a loop variable `step`.
+
 ## Flat pattern geometry
 
 - **`FlatPattern.FlatBendResults` lists every bend twice** — once for the top face and
