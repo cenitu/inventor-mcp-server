@@ -8,6 +8,8 @@
   are the same as before — compared query by query against the COM code, which stays as the way
   back: when iLogic is missing or refuses, the tools read through COM as they did, and
   `get_status` says so (`reading`). `INVENTOR_MCP_RULES=0` turns the rules off.
+- Rules run with iLogic's own `SilentOperation` on: a rule that does not compile or fails used to
+  open an iLogic dialog and hold the call. On an iLogic without that switch no rule is run.
 - `inspect_model` no longer leaves an assembly marked as changed: recomputing the mass called
   `Update()`, which sets the flag although nothing was edited. A document that was clean stays clean.
 - `check_fastener_alignment`: documents are told apart by their full document name, so two model

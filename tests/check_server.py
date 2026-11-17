@@ -780,6 +780,51 @@ for rule_name in ("read_brep.iLogicVb", "scan_planar.iLogicVb"):
     check(f"{rule_name} touches no file and starts nothing",
           not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject", "Registry", "WebClient")))
 
+# running a rule: iLogic's own silent mode on for the call, put back after it
+class FakeAutomation:
+    def __init__(self, result=None, silent=False):
+        self.SilentOperation, self.result, self.seen = silent, result, []
+
+    def RunExternalRuleWithArguments(self, doc, path, args):
+        self.seen.append(self.SilentOperation)
+        if self.result is not None:
+            args.values["result"] = self.result
+        return 0 if self.result is not None else -1
+
+
+class FakeArgs:
+    def __init__(self):
+        self.values = {}
+
+    def Add(self, key, value):
+        self.values[key] = value
+
+    def Item(self, key):
+        return self.values[key]
+
+
+def runner(automation):
+    c = api.InventorConnection()
+    c._app = Fake(SilentOperation=False, TransientObjects=Fake(CreateNameValueMap=FakeArgs),
+                  ApplicationAddIns=Fake(ItemById=lambda _id: Fake(Activated=True, Automation=automation)))
+    return c
+
+
+quiet = FakeAutomation(result='{"leaves": []}')
+got = runner(quiet)._run_rule(None, "read_brep.iLogicVb", what="faces")
+check("a rule runs with iLogic's own SilentOperation on, and the user's setting comes back after",
+      got == {"leaves": []} and quiet.seen == [True] and quiet.SilentOperation is False, str((got, quiet.seen)))
+ok, why = raises(lambda: runner(FakeAutomation())._run_rule(None, "read_brep.iLogicVb"), "gave no result (iLogic answered -1)")
+check("a rule that does not compile is an error, not a wait", ok, why)
+no_switch = Fake(RunExternalRuleWithArguments=lambda *a: 1 / 0)   # an iLogic without SilentOperation
+ok, why = raises(lambda: runner(no_switch)._run_rule(None, "read_brep.iLogicVb"), "can't be kept from showing error dialogs")
+check("without that switch no rule is run", ok, why)
+old_ilogic = runner(no_switch)
+old_ilogic._app.ActiveDocument = Fake(DocumentType=12290, ComponentDefinition=Fake())
+old_ilogic._find_faces_com = lambda *a, **kw: ["through COM"]
+check("…and find_faces reads through COM on such an Inventor",
+      old_ilogic.find_faces() == ["through COM"] and "error dialogs" in old_ilogic.reading_mode(), old_ilogic.reading_mode())
+
 clean = Fake(Dirty=False)
 clean.Update = lambda: setattr(clean, "Dirty", True)
 reader._fresh_mass(clean, Fake(MassProperties=Fake()))

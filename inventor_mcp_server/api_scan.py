@@ -145,16 +145,32 @@ class ScanMixin:
         except Exception as e:
             raise RuntimeError("This needs Inventor's iLogic add-in (Tools > Add-Ins > iLogic), and it could "
                                f"not be reached: {describe_com_error(e)}") from None
+        # iLogic shows its own dialogs for a rule that does not compile or fails ("Rule Compile
+        # Errors …", "Error on line …") — Inventor's SilentOperation does not stop those, and the
+        # call waits behind them. Its own SilentOperation does: the call then comes straight
+        # back with an error code. Without that switch a rule is not run at all.
+        try:
+            was_silent = bool(automation.SilentOperation)
+            automation.SilentOperation = True
+        except Exception:
+            raise RuntimeError("This Inventor's iLogic can't be kept from showing error dialogs "
+                               "(no Automation.SilentOperation), so rules are not run on it") from None
         args = self.app.TransientObjects.CreateNameValueMap()
         for key, value in arguments.items():
             args.Add(key, value)
-        self._silently(lambda: automation.RunExternalRuleWithArguments(doc, rule_path, args))
+        try:
+            code = self._silently(lambda: automation.RunExternalRuleWithArguments(doc, rule_path, args))
+        finally:
+            try:
+                automation.SilentOperation = was_silent
+            except Exception:
+                pass
         try:
             text = args.Item("result")
         except Exception:
-            raise RuntimeError(f"The rule {rule} gave no result — it did not run to its end. iLogic may have "
-                               "refused it (Tools > Options > iLogic Configuration > security), or it does "
-                               "not compile on this Inventor.") from None
+            raise RuntimeError(f"The rule {rule} gave no result (iLogic answered {code!r}) — it did not run "
+                               "to its end: it does not compile on this Inventor, or iLogic refused it "
+                               "(Tools > Options > iLogic Configuration > security).") from None
         result = json.loads(text)
         if "error" in result:
             raise RuntimeError(f"The rule {rule} failed inside Inventor: {result['error'][:600]}")
