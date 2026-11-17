@@ -150,9 +150,60 @@ DEFAULT = "default"
 _local = threading.local()  # .instance and .call on each Inventor thread
 
 
+# A call that outlives the wait keeps running, and its result used to exist only in this
+# process, for manage_call to hand over. When that call can't be made (a client that
+# refuses it, a restart of the client) the result was lost — so it is also written here.
+CALLS_DIR = os.environ.get("INVENTOR_MCP_CALLS") or os.path.join(os.path.expanduser("~"), ".inventor-mcp", "calls")
+CALLS_KEPT = 30
+
+
+def _result_file(inst_name: str, call) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{inst_name}-{call.name}")
+    return os.path.join(CALLS_DIR, f"{time.strftime('%Y%m%d-%H%M%S', time.localtime(call.wall_started))}-{safe}.json")
+
+
+def _write_result(inst_name: str, call) -> None:
+    """The finished call as JSON: status, seconds, result, execute_python's output."""
+    try:
+        try:
+            result, status = call.future.result(), "finished"
+        except _Cancelled as e:
+            result, status = str(e), "cancelled"
+        except BaseException as e:
+            result, status = f"{type(e).__name__}: {e}", "error"
+        record = {"call": call.name, "instance": inst_name, "status": status,
+                  "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(call.wall_started)),
+                  "seconds": round((call.finished or time.monotonic()) - call.started, 1),
+                  "result": result if isinstance(result, (str, int, float, bool, type(None), list, dict)) else str(result),
+                  "output": call.output.getvalue() if call.output is not None else ""}
+        os.makedirs(CALLS_DIR, exist_ok=True)
+        with open(call.result_file + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=1, default=str)
+        os.replace(call.result_file + ".tmp", call.result_file)   # never a half-written file
+        old = sorted(n for n in os.listdir(CALLS_DIR) if n.endswith(".json"))[:-CALLS_KEPT]
+        for name in old:
+            os.remove(os.path.join(CALLS_DIR, name))
+    except Exception:
+        pass  # the result is still in memory for manage_call
+
+
+def _eta(call) -> str:
+    """'about 40 s left' from progress(done, total), once there is something to go by."""
+    if not call.fraction:
+        return ""
+    t, done = call.fraction
+    if not 0 < done < 1 or t - call.started < 2:
+        return ""
+    left = (t - call.started) * (1 - done) / done - (time.monotonic() - t)
+    return f", about {max(left, 0):.0f} s left" if left < 5400 else f", about {left / 3600:.1f} h left"
+
+
 class _Call:
     def __init__(self, name):
         self.name, self.future = name, None
+        self.wall_started = time.time()
+        self.result_file = ""       # set when it outlives the wait: where its result is written
+        self.fraction = None        # (time, share done) of execute_python's last progress(done, total)
         self.started, self.finished = time.monotonic(), None
         self.timed_out = False      # outlived CALL_TIMEOUT: the client never saw the result
         self.collected = False      # call_status has returned the result
@@ -267,7 +318,7 @@ def _live_report(call: _Call) -> str:
     lines = []
     if call.progress:
         t, text = call.progress
-        lines.append(f"Progress: {text} ({time.monotonic() - t:.0f} s ago)")
+        lines.append(f"Progress: {text} ({time.monotonic() - t:.0f} s ago{_eta(call)})")
     out = call.output.getvalue().strip() if call.output is not None else ""
     if out:
         lines.append(f"Latest output ({out.count(chr(10)) + 1} lines so far):\n{_tail(out)}")
@@ -426,23 +477,40 @@ def _on_com_thread(inst: _Instance, fn, args, kwargs, wait=None):
         return call.future.result(timeout=CALL_TIMEOUT if wait is None else wait)
     except concurrent.futures.TimeoutError:
         call.timed_out = True
+        call.result_file = _result_file(inst.name, call)
+        call.future.add_done_callback(lambda _: _write_result(inst.name, call))
         return (_busy_report(inst, call) + _live_report(call) + "\nIt keeps running in the background — "
-                "manage_call(wait_seconds=30) follows it and gets its result; manage_call(action='cancel') stops it.")
+                "manage_call(wait_seconds=30) follows it and gets its result; manage_call(action='cancel') stops it."
+                f"\nWhen it ends, the result is also written to {call.result_file}")
 
 
 Instance = Annotated[str, Field(
     description="Which connected Inventor to use (list_instances). Leave empty when only one is connected.")]
 
 
-def tool(com: bool = True):
+def _register(fn, read_only: bool):
+    """mcp.tool(); a read-only tool (it changes neither the model nor any file) says so in
+    its annotations, so a client can let it through where it asks before a change."""
+    if read_only:
+        try:
+            from mcp.types import ToolAnnotations
+            # by wire name: the field is readOnlyHint in SDK 1.x and read_only_hint in 2.x
+            hints = ToolAnnotations.model_validate({"readOnlyHint": True, "openWorldHint": False})
+            return mcp.tool(annotations=hints)(fn)
+        except (ImportError, TypeError):  # an SDK without tool annotations
+            pass
+    return mcp.tool()(fn)
+
+
+def tool(com: bool = True, read_only: bool = False):
     """mcp.tool() that runs the function on the chosen Inventor's thread (see above) and
     adds an `instance` parameter to pick it. com=False for tools that must answer while
-    that thread is busy.
+    that thread is busy. read_only=True for tools that only look.
     The tool is async and waits in a worker thread: the MCP SDK runs sync tools on its
     event loop, so one agent's long call would hold up another agent's Inventor."""
     def deco(fn):
         if not com:
-            return mcp.tool()(fn)
+            return _register(fn, read_only)
 
         @functools.wraps(fn)
         async def wrapper(*args, instance: str = "", **kwargs):
@@ -456,7 +524,7 @@ def tool(com: bool = True):
         wrapper.__signature__ = sig.replace(parameters=[
             *sig.parameters.values(),
             _inspect.Parameter("instance", _inspect.Parameter.KEYWORD_ONLY, default="", annotation=Instance)])
-        return mcp.tool()(wrapper)
+        return _register(wrapper, read_only)
     return deco
 
 
@@ -465,7 +533,8 @@ def _call_status(inst: _Instance) -> str:
     if c is None:
         return "No Inventor call has been made yet."
     if not c.future.done():
-        return _busy_report(inst, c) + _live_report(c)
+        return (_busy_report(inst, c) + _live_report(c)
+                + (f"\nWhen it ends, the result is also written to {c.result_file}" if c.result_file else ""))
     took = f"{c.finished - c.started:.0f} s"
     if not c.timed_out or c.collected:
         return f"Last call '{c.name}' finished ({took}); its result was already returned."
@@ -474,7 +543,8 @@ def _call_status(inst: _Instance) -> str:
         result = c.future.result()
     except Exception as e:
         result = f"ERROR: {type(e).__name__}: {e}"
-    return f"'{c.name}' finished after {took}:\n{result}"
+    return (f"'{c.name}' finished after {took}" + (f" (also in {c.result_file})" if c.result_file else "")
+            + f":\n{result}")
 
 
 async def call_status(wait_seconds: float = 0, instance: Instance = "") -> str:
@@ -642,11 +712,20 @@ def _load_libraries(me) -> str:
     return "\n".join(notes)
 
 
-def _progress(msg) -> None:
-    """execute_python: a short status line manage_call shows while the code runs."""
+def _progress(msg, total=None) -> None:
+    """execute_python: a short status line manage_call shows while the code runs.
+    progress(done, total) — two numbers — also lets it say how long is left."""
     call = getattr(_local, "call", None)
-    if call is not None:
-        call.progress = (time.monotonic(), str(msg)[:200])
+    if call is None:
+        return
+    now = time.monotonic()
+    if total is not None:
+        try:
+            call.fraction = (now, float(msg) / float(total))
+            msg = f"{msg} of {total}"
+        except (TypeError, ValueError, ZeroDivisionError):
+            msg = f"{msg} {total}"
+    call.progress = (now, str(msg)[:200])
 
 
 def _cancelled() -> bool:
@@ -815,7 +894,7 @@ def reload_api() -> str:
     return "inventor_api.py and its parts reloaded (connections preserved)"
 
 
-@tool()
+@tool(read_only=True)
 def capture_view(views: str = "iso", width: int = 800, height: int = 600,
                  background: str = "inventor", fit_to: str = "", isolate: str = "",
                  sketches: bool = False, up: str = "y", look_from: list[float] | None = None,
@@ -995,7 +1074,7 @@ def _describe():  # on an Inventor's thread
             f"{app.Documents.VisibleDocuments.Count} open, active: {doc.DisplayName if doc else '-'}")
 
 
-@tool(com=False)
+@tool(com=False, read_only=True)
 async def list_instances() -> str:
     """The Inventors this server is connected to — name, project, open documents — and any
     other running Inventor it can't reach (opened by hand). Answers even while they are busy."""
@@ -1035,7 +1114,7 @@ def _list_instances() -> str:
     return "\n".join(lines) or "No Inventor is running. Call connect()."
 
 
-@tool()
+@tool(read_only=True)
 def get_status() -> str:
     """Check connection status, active document info, and the execute_python
     namespace (age, names you defined — gone after a server restart or reload_api).
@@ -1066,7 +1145,7 @@ def get_status() -> str:
 
 # ---------- Finding geometry ----------
 
-@tool()
+@tool(read_only=True)
 def find_faces(path: str = "", surface: str = "", normal: list[float] | None = None,
                at: dict | None = None, diameter: float = 0, min_area: float = 0,
                max_count: int = 30) -> str:
@@ -1088,7 +1167,7 @@ def find_faces(path: str = "", surface: str = "", normal: list[float] | None = N
                       indent=1, ensure_ascii=False)
 
 
-@tool()
+@tool(read_only=True)
 def find_edges(path: str = "", at: dict | None = None, circular: bool = False, diameter: float = 0,
                min_length: float = 0, max_count: int = 40) -> str:
     """Find edges, filtered by position or type. Without `path`: the active part (the `index`
@@ -1107,7 +1186,7 @@ def find_edges(path: str = "", at: dict | None = None, circular: bool = False, d
                       indent=1, ensure_ascii=False)
 
 
-@tool()
+@tool(read_only=True)
 def inspect_model() -> str:
     """Snapshot of the active document in one call. Part: volume, bounding box, face and edge
     counts, feature tree, sketches, sheet metal thickness, warnings (faceted curves, surface
@@ -1475,13 +1554,16 @@ def constrain(a: str, b: str, kind: str = "mate", offset: float = 0, angle: floa
 
 # ---------- The call in progress ----------
 
-@tool(com=False)
+@tool(com=False)   # "cancel" stops a call, so it is not marked read-only as a whole
 async def manage_call(action: str = "status", wait_seconds: float = 0, instance: Instance = "") -> str:
     """Follow or stop a call that outlived the wait — a long execute_python, a Content Center scan,
     one stuck behind an Inventor dialog.
 
-    "status": elapsed time, any open dialog's text, output so far, progress() line — and the
-    result once it has finished. wait_seconds waits (at most 45 s) and returns as soon as it ends.
+    "status": elapsed time, any open dialog's text, output so far, progress() line (with the
+    time left after progress(done, total)) — and the result once it has finished. wait_seconds
+    waits (at most 45 s) and returns as soon as it ends. The result of a call that outlived the
+    wait is also written as JSON under ~/.inventor-mcp/calls (INVENTOR_MCP_CALLS) — the message
+    that says it keeps running names the file — so it can be read there if this tool can't be called.
     "cancel": cancelled() in execute_python code turns True at once; code still running after 2 s
     gets a KeyboardInterrupt, repeated until it stops. That lands at the next Python line: a call
     stuck INSIDE one COM operation or behind a dialog stops only once that returns.
@@ -1719,7 +1801,7 @@ def draw_pattern(shape: str = "circle", diameter: float = 0, length: float = 0,
                               sketch_index if sketch_index > 0 else None)
 
 
-@tool()
+@tool(read_only=True)
 def check_sketch(sketch_index: int = 0) -> str:
     """Why won't it extrude? Checks a sketch for what a closed profile needs: open ends, gaps
     (two ends a hair apart, not joined), points where 3+ curves meet (overlaps, stray
@@ -2213,7 +2295,7 @@ def import_step(step_path: str, dest_folder: str, name: str = "") -> str:
     return json.dumps(inv.import_step(step_path, dest_folder, name or None), indent=1, ensure_ascii=False)
 
 
-@tool()
+@tool(read_only=True)
 def check_interference(set_a: str, set_b: str = "", ignore_fasteners: bool = False) -> str:
     """Check overlap between occurrences of the active assembly: full paths of both, volume and
     bounding box of each. Touching faces are not reported. Intended overlaps (gasket compression,
@@ -2265,7 +2347,7 @@ def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to
                       indent=1, ensure_ascii=False)
 
 
-@tool()
+@tool(read_only=True)
 def measure_distance(a: str, b: str) -> str:
     """Minimum distance in mm between two occurrences (0 = touching/overlapping).
     Names as in manage_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""

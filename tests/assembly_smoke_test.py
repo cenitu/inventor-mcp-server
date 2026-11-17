@@ -168,6 +168,25 @@ def assembly_tests(inv, run, plate, pin):
         return out
     run.step("replace_occurrence keeps the constraint, archives the old file", replace)
 
+    def deeper_info():
+        info = inv.assembly_info()
+        files = [c.get("file") for c in info["components"]]
+        if files != ["smoke_plate.ipt", "smoke_pin_b.ipt"] or info.get("parts_total") != 2 \
+                or info.get("parts_different") != 2:
+            _raise(str(info))
+        inv.place_component(plate, 0, 0, 100)
+        try:
+            info = inv.assembly_info()
+            if info["parts_total"] != 3 or info["parts_different"] != 2 \
+                    or info["most_used"] != [{"file": "smoke_plate.ipt", "count": 2}]:
+                _raise(str(info))
+        finally:
+            inv.delete_occurrence("smoke_plate:2", force=True)
+        if "type" in inv.get_document_info() or inv.get_document_info()["type_name"] != "assembly":
+            _raise(str(inv.get_document_info()))
+        return f"{info['parts_total']} parts, {info['parts_different']} different"
+    run.step("assembly_info: files, totals, most used", deeper_info)
+
     def clearances():
         inv.place_component(plate, 0, 0, 10.1)   # 0.1 mm above the grounded plate
         try:

@@ -882,7 +882,6 @@ class FeaturesMixin:
         info = {
             "name": doc.DisplayName,
             "full_path": doc.FullFileName,
-            "type": str(doc.DocumentType),
             "type_name": {kPartDocumentObject: "part", kAssemblyDocumentObject: "assembly",
                           kDrawingDocumentObject: "drawing"}.get(doc.DocumentType, "other"),
         }

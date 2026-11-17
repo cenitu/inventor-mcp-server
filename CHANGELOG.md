@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Read-only tools carry `readOnlyHint` (`get_status`, `list_instances`, `inspect_model`, `find_faces`,
+  `find_edges`, `check_sketch`, `check_interference`, `measure_distance`, `capture_view`).
+- The result of a call that outlived the wait is also written as JSON under `~/.inventor-mcp/calls`
+  (`INVENTOR_MCP_CALLS`); the message that says it keeps running names the file. `progress(done, total)`
+  in `execute_python` lets `manage_call` say how long is left.
+- `inspect_model` on an assembly: each component's file, the parts of a sub-assembly, the number of
+  parts at any depth and of different ones, the most used files. `get_status` drops the raw document
+  type number (`type_name` stays).
 - **Resources.** The API field notes are served as `inventor://notes/api` (and, from a clone,
   the modelling skill as `inventor://skills/modeling`), so an agent can read the units, enum
   values and silent failures before it writes `execute_python` code. The notes moved into the
