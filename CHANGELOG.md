@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-11-17
+
+One new tool (65 → 66), no renames. Geometry is now read inside Inventor, which makes a hole check of a
+400-part assembly a matter of seconds; the rest answers an agent's feedback from such an assembly.
+
 - **`check_fastener_alignment`** — do the holes and slots of parts that lie on each other line up?
   For every opening in a face that lies on another part: aligned, misaligned (by how much, and the
   largest bolt that still passes), engaged (a pin or stud of the other part goes into it — or does
