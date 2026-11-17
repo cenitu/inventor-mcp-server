@@ -74,7 +74,7 @@ check("wrapped tools keep their parameters",
 read_only = sorted(t.name for t in pkg_tools   # by wire name: the attribute differs between SDK 1.x and 2.x
                    if t.annotations and t.annotations.model_dump(by_alias=True).get("readOnlyHint"))
 check("the tools that only look are marked read-only, and no tool that changes something is",
-      read_only == ["capture_view", "check_interference", "check_sketch", "find_edges", "find_faces", "get_status",
+      read_only == ["capture_view", "check_fastener_alignment", "check_interference", "check_sketch", "find_edges", "find_faces", "get_status",
                     "inspect_model", "list_instances", "measure_distance"], str(read_only))
 
 print("Inventor thread (no Inventor needed):")
@@ -583,6 +583,110 @@ for label, call, fragment in (
         ("remove_original is for a mirrored body", lambda: conn.mirror("2", remove_original=True), "body=True")):
     ok, why = raises(call, fragment)
     check("patterns and mirrors: " + label, ok, why)
+
+print("Holes of parts that lie on each other (no Inventor needed):")
+align = importlib.import_module("inventor_mcp_server.alignment")
+scan_mod = importlib.import_module("inventor_mcp_server.api_scan")
+
+
+def _rect(x0, y0, x1, y1, z):
+    c = [(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)]
+    return [{"k": "l", "pts": [list(c[i]), list(c[(i + 1) % 4])]} for i in range(4)]
+
+
+def _hole(x, y, d):
+    return lambda z: {"outer": False, "edges": [{"k": "c", "c": [x, y, z], "r": d / 2}]}
+
+
+def _slot(x, y, d, length):
+    r, h = d / 2, (length - d) / 2
+
+    def make(z):
+        arc = lambda cx, a0: [[cx + r * math.cos(a0 + math.pi * k / 8), y + r * math.sin(a0 + math.pi * k / 8), z]
+                              for k in range(9)]
+        return {"outer": False, "edges": [
+            {"k": "a", "c": [x + h, y, z], "r": r, "pts": arc(x + h, -math.pi / 2)},
+            {"k": "l", "pts": [[x + h, y + r, z], [x - h, y + r, z]]},
+            {"k": "a", "c": [x - h, y, z], "r": r, "pts": arc(x - h, math.pi / 2)},
+            {"k": "l", "pts": [[x - h, y - r, z], [x + h, y - r, z]]}]}
+    return make
+
+
+def _plate(w, h, t, openings):
+    face = lambda z, n: {"p": [1, 1, z], "n": n, "area": w * h,
+                         "loops": [{"outer": True, "edges": _rect(0, 0, w, h, z)}] + [mk(z) for mk in openings]}
+    return {"faces": [face(t, [0, 0, 1]), face(0, [0, 0, -1])]}
+
+
+# a 200 x 100 base; a 160 x 60 bracket lies on it (its underside at z = 2)
+base = _plate(200, 100, 2, [_hole(20, 20, 6.5), _hole(60, 20, 6.5), _hole(100, 20, 6.5), _hole(180, 80, 6.5),
+                            _slot(140, 20, 6.5, 16), _hole(120, 45, 30)])
+bracket = _plate(160, 60, 3, [_hole(20, 20, 6.5), _hole(61.5, 20, 6.5), _hole(143, 20, 6.5), _hole(30, 45, 9),
+                              _hole(139.5, 45, 10)])
+on_top = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2]
+placed = [{"path": "base:1", "file": "base.ipt", "m": scan_mod.IDENTITY},
+          {"path": "bracket:1", "file": "bracket.ipt", "m": on_top}]
+found = align.check(placed, {"base.ipt": base, "bracket.ipt": bracket})
+rows = found["aligned_rows"]
+check("holes on each other: one aligned pair, and a hole inside a slot's travel",
+      found["aligned"] == 2 and sorted(r["b_opening"] + "|" + r["a_opening"] for r in rows)
+      == ["Ø6.5|slot 6.5x16", "Ø6.5|Ø6.5"], str(rows))
+slot_row = next(r for r in rows if "slot" in r["a_opening"])
+check("a slot row points at the round hole, where the bolt goes",
+      slot_row["at"] == [143, 20, 2] and slot_row["passes"] == "M6", str(slot_row))
+check("a hole 1.5 mm off is misaligned, with the bolt that still passes",
+      len(found["misaligned"]) == 1 and found["misaligned"][0]["offset_mm"] == 1.5
+      and found["misaligned"][0]["largest_bolt_mm"] == 5.0 and found["misaligned"][0]["passes"] == "M5",
+      str(found["misaligned"]))
+blocked = sorted((b["part"], b["opening"], b["behind"]) for b in found["blocked"])
+check("holes with solid sheet behind them are blocked — also two that only graze each other",
+      blocked == [("base:1", "Ø30", "bracket:1"), ("base:1", "Ø6.5", "bracket:1"),
+                  ("bracket:1", "Ø10", "base:1"), ("bracket:1", "Ø9", "base:1")], str(blocked))
+check("a hole the other part does not reach is open",
+      [(o["part"], o["at"]) for o in found["open"]] == [("base:1", [180, 80, 2])], str(found["open"]))
+apart = [placed[0], {"path": "bracket:1", "file": "bracket.ipt", "m": on_top[:11] + [2.4]}]
+check("faces 0.4 mm apart still lie on each other; 0.6 mm apart they don't",
+      align.check(apart, {"base.ipt": base, "bracket.ipt": bracket})["aligned"] == 2
+      and align.check([placed[0], {"path": "bracket:1", "file": "bracket.ipt", "m": on_top[:11] + [2.6]}],
+                      {"base.ipt": base, "bracket.ipt": bracket})["pairs_of_parts_in_contact"] == 0)
+turned = [0, -1, 0, 60, 1, 0, 0, 0, 0, 0, 1, 2]   # the bracket turned 90° about Z: its hole at (20, 20) lands on (40, 20)
+moved = align.check([placed[0], {"path": "bracket:1", "file": "bracket.ipt", "m": turned}],
+                    {"base.ipt": _plate(200, 200, 2, [_hole(40, 20, 6.5)]), "bracket.ipt": _plate(160, 60, 3, [_hole(20, 20, 6.5)])})
+check("a turned component is compared where it really is", moved["aligned"] == 1, str(moved["aligned"]))
+stud = _plate(160, 60, 3, [_hole(20, 20, 6.5)])
+for face in stud["faces"]:
+    face["loops"][1]["hole"] = False          # the foot of a stud standing on the face, not a hole
+with_stud = align.check(placed, {"base.ipt": base, "bracket.ipt": stud})
+pinned = [(r["part"], r["opening"], r["stud"], r["clearance_mm"]) for r in with_stud["stud_does_not_fit"]]
+check("an inner loop around something that stands on the face is a stud, not an opening: "
+      "a Ø6.5 stud in a Ø6.5 hole is engaged",
+      with_stud["aligned"] == 0 and len(with_stud["engaged_rows"]) == 1
+      and with_stud["engaged_rows"][0]["stud_of"] == "bracket:1" and with_stud["engaged_rows"][0]["clearance_mm"] == 0
+      and not pinned, str(with_stud["engaged_rows"]))
+for face in stud["faces"]:
+    face["loops"][1]["edges"][0]["c"][0] = 21.0     # the stud 1 mm off
+off_stud = align.check(placed, {"base.ipt": base, "bracket.ipt": stud})
+check("a stud that is 1 mm off in a hole of its own size does not fit",
+      [(r["part"], r["clearance_mm"]) for r in off_stud["stud_does_not_fit"]] == [("base:1", -1.0)],
+      str(off_stud["stud_does_not_fit"]))
+u_shape = [(0, 0, 0), (30, 0, 0), (30, 20, 0), (20, 20, 0), (20, 5, 0), (10, 5, 0), (10, 20, 0), (0, 20, 0)]
+u_segments = [(u_shape[i], u_shape[(i + 1) % 8]) for i in range(8)]
+inner = align._interior_point(u_segments)
+check("a U-shaped cut-out is represented by a point inside it, not by its centroid",
+      align._inside((inner[0], inner[1]), [((a[0], a[1]), (b[0], b[1])) for a, b in u_segments]), str(inner))
+
+scan_mod.SCAN_CACHE = _tempfile.mkdtemp(prefix="inventor_mcp_scan_")
+part_file = os.path.join(scan_mod.SCAN_CACHE, "plate.ipt")
+open(part_file, "w").write("v1")
+scan_mod.cache_put(part_file, "rule-a", {"faces": [1]})
+check("a scan is kept per file", scan_mod.cache_get(part_file, "rule-a") == {"faces": [1]})
+check("…and not used for another version of the rule", scan_mod.cache_get(part_file, "rule-b") is None)
+open(part_file, "w").write("version two")
+check("…nor once the file has changed", scan_mod.cache_get(part_file, "rule-a") is None)
+rule_text = open(os.path.join(ROOT, "inventor_mcp_server", "rules", "scan_planar.iLogicVb"), encoding="utf-8").read()
+code = "\n".join(l for l in rule_text.split("\n") if not l.lstrip().startswith("'"))
+check("the rule touches no file and starts nothing (iLogic's Security Alert would hold the call)",
+      not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject", "Registry", "WebClient")))
 
 print("Resources:")
 listed = asyncio.run(pkg.mcp.list_resources())

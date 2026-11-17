@@ -6,7 +6,7 @@ module per area. Reloading this module (the reload_api tool) reloads every part 
 import importlib
 import sys
 
-_PARTS = ("api_common", "flat_checks", "api_documents", "api_sketch", "api_features", "api_sheet_metal", "api_views", "api_outputs", "api_library", "api_assembly", "api_tools")
+_PARTS = ("api_common", "flat_checks", "api_documents", "api_sketch", "api_features", "api_sheet_metal", "api_views", "api_outputs", "api_library", "api_assembly", "api_tools", "alignment", "api_scan")
 
 
 def _part(name):
@@ -23,7 +23,8 @@ rule_from_name = _parts["flat_checks"].rule_from_name
 
 
 # A later part wins where two define the same name, as later definitions did in one class.
-class InventorConnection(_parts["api_tools"].ToolsMixin,
+class InventorConnection(_parts["api_scan"].ScanMixin,
+                         _parts["api_tools"].ToolsMixin,
                          _parts["api_assembly"].AssemblyMixin,
                          _parts["api_library"].LibraryMixin,
                          _parts["api_outputs"].OutputsMixin,
@@ -35,5 +36,5 @@ class InventorConnection(_parts["api_tools"].ToolsMixin,
     """One connection to one Inventor: every wrapper method, from all the parts."""
 
 
-for _name, _class in (("api_documents", "DocumentsMixin"), ("api_sketch", "SketchMixin"), ("api_features", "FeaturesMixin"), ("api_sheet_metal", "SheetMetalMixin"), ("api_views", "ViewsMixin"), ("api_outputs", "OutputsMixin"), ("api_library", "LibraryMixin"), ("api_assembly", "AssemblyMixin"), ("api_tools", "ToolsMixin")):
+for _name, _class in (("api_documents", "DocumentsMixin"), ("api_sketch", "SketchMixin"), ("api_features", "FeaturesMixin"), ("api_sheet_metal", "SheetMetalMixin"), ("api_views", "ViewsMixin"), ("api_outputs", "OutputsMixin"), ("api_library", "LibraryMixin"), ("api_assembly", "AssemblyMixin"), ("api_tools", "ToolsMixin"), ("api_scan", "ScanMixin")):
     assert issubclass(InventorConnection, getattr(_parts[_name], _class))

@@ -2348,6 +2348,44 @@ def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to
 
 
 @tool(read_only=True)
+def check_fastener_alignment(parts: str = "", max_gap: float = 0.5, tolerance: float = 0.1,
+                             refresh: bool = False, include_fasteners: bool = False, limit: int = 40) -> str:
+    """Do the holes and slots of parts that lie on each other line up? Run it on an assembly
+    before it goes to the shop — a hole that is 1.5 mm off costs a part.
+
+    Wherever a flat face of one part lies on a flat face of another (facing each other, at most
+    max_gap apart), every hole, slot and cut-out in those faces is compared with what is behind it:
+      aligned     an opening of the other part, off by at most `tolerance` (counted, by size)
+      misaligned  an opening that is off: by how much, and the largest bolt that still passes
+      engaged     a pin, stud or boss of the other part goes into it (counted, by size);
+                  stud_does_not_fit lists the ones that are too big or too far off
+      blocked     solid material of the other part — a hole nothing can go through
+      open        the other part does not reach there
+    Positions are in assembly mm. Fasteners (Content Center parts) and hidden components are
+    left out. The geometry is read inside Inventor and kept per file on disk, so a 400-part
+    assembly takes seconds, and the next call less; a part with unsaved changes is read anew.
+    Changes nothing. Holes are compared as modelled in the part files: an assembly-level cut
+    is not seen. Only flat faces are compared, and what sits INSIDE a hole is not looked at: an
+    "open" hole may hold a pin or a rivet nut that is its own part.
+    Each row has `at` (assembly mm) and `axis` (out of the part, towards the other one) —
+    capture_view(look_from=…, target=at) shows the spot.
+
+    Args:
+        parts: Name patterns, ","-separated, on the component path or the file name
+               ("*DOOR*,ET1-0?.ipt"); empty = every part.
+        max_gap: Faces up to this far apart (mm) count as lying on each other — a gasket or
+                 powder coat gap; 0.5 by default.
+        tolerance: Openings off by more than this (mm) are misaligned.
+        refresh: Read every file again instead of using what is kept on disk.
+        include_fasteners: Also compare Content Center parts.
+        limit: Rows listed per kind; the counts are always complete.
+    """
+    names = [s.strip() for s in parts.split(",") if s.strip()] or None
+    return json.dumps(inv.fastener_alignment(names, max_gap, tolerance, refresh, include_fasteners, limit),
+                      indent=1, ensure_ascii=False)
+
+
+@tool(read_only=True)
 def measure_distance(a: str, b: str) -> str:
     """Minimum distance in mm between two occurrences (0 = touching/overlapping).
     Names as in manage_occurrences; "Asm:1/2" reaches a part inside a sub-assembly."""
