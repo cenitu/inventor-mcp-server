@@ -31,10 +31,15 @@ def _cache_file(path: str) -> str:
     return os.path.join(SCAN_CACHE, hashlib.sha1(os.path.normcase(path).encode("utf-8")).hexdigest() + ".json")
 
 
+def _file_of(name: str) -> str:
+    """The file behind a document name: "C:\\x\\part.ipt<Flat>" is a model state of part.ipt."""
+    return name.split("<")[0]
+
+
 def cache_get(path: str, version: str):
-    """The stored scan of a file, if the file on disk is still the one that was scanned."""
+    """The stored scan of a document, if its file on disk is still the one that was scanned."""
     try:
-        st = os.stat(path)
+        st = os.stat(_file_of(path))
         with open(_cache_file(path), encoding="utf-8") as f:
             entry = json.load(f)
         if entry["rule"] == version and entry["mtime_ns"] == st.st_mtime_ns and entry["size"] == st.st_size:
@@ -46,7 +51,7 @@ def cache_get(path: str, version: str):
 
 def cache_put(path: str, version: str, part: dict) -> None:
     try:
-        st = os.stat(path)
+        st = os.stat(_file_of(path))
         os.makedirs(SCAN_CACHE, exist_ok=True)
         target = _cache_file(path)
         with open(target + ".tmp", "w", encoding="utf-8") as f:
@@ -57,7 +62,76 @@ def cache_put(path: str, version: str, part: dict) -> None:
         pass   # the scan is still good for this call
 
 
+SURFACES = {5890: "plane", 5891: "cylinder", 5893: "cone", 5895: "torus", 5896: "sphere", 5897: "bspline"}
+
+
+def face_info(row: list, surfaces: dict = SURFACES) -> dict:
+    """A face as find_faces describes it, from the numbers read_brep.iLogicVb hands back
+    (cm, unrounded) — the same arithmetic as InventorConnection._face_info, so the answer
+    does not depend on how the face was read."""
+    st = int(row[0])
+    lo, hi = row[2:5], row[5:8]
+    info = {"type": surfaces.get(st, str(st)), "area_mm2": round(row[1] * 100, 1),
+            "center": [round((a + b) / 2 * 10, 3) for a, b in zip(lo, hi)]}
+    if st == 5890:
+        s = -1 if row[11] else 1
+        info["normal"] = [round(s * c, 4) + 0.0 for c in row[8:11]]
+    elif st in (5891, 5893):
+        info["axis"] = [round(c, 4) + 0.0 for c in row[8:11]]
+        info["axis_point"] = [round(c * 10, 3) for c in row[11:14]]
+        if st == 5891:
+            info["diameter"] = round(row[14] * 20, 3)
+    return info
+
+
+def edge_info(row: list) -> dict:
+    """An edge as find_edges describes it — the arithmetic of InventorConnection._edge_info."""
+    kind = int(row[0])
+    if kind == 5124:
+        return {"type": "circle", "diameter": round(row[1] * 20, 3), "at": [round(c * 10, 3) for c in row[2:5]]}
+    a, b = row[1:4], row[4:7]
+    return {"type": {5123: "line", 5125: "arc"}.get(kind, "curve"),
+            "length": round(sum((p - q) ** 2 for p, q in zip(a, b)) ** 0.5 * 10, 3),
+            "at": [round((p + q) * 5, 3) for p, q in zip(a, b)]}
+
+
 class ScanMixin:
+    def reading_mode(self) -> str:
+        """How faces and edges are read on this connection."""
+        if os.environ.get("INVENTOR_MCP_RULES", "1").strip() in ("0", "off", "false"):
+            return "through COM (INVENTOR_MCP_RULES=0)"
+        off = getattr(self, "_rules_off", "")
+        return f"through COM — slower; rules inside Inventor are off: {off}" if off else "inside Inventor (iLogic rules)"
+
+    def _inside(self, rule: str, **arguments):
+        """The rule's answer, or None when the caller should read through COM instead:
+        rules switched off, iLogic not there or refusing (remembered for this connection),
+        or the rule could not do this one request (say, a component name that does not exist
+        — the COM code then gives its own, fuller error)."""
+        if not self.reading_mode().startswith("inside"):
+            return None
+        try:
+            return self._run_rule(self.active_document(), rule, **arguments)
+        except RuntimeError as e:
+            text = str(e)
+            if "failed inside Inventor" not in text:     # iLogic itself is the problem, not this request
+                self._rules_off = text[:160]
+            return None
+        except Exception as e:                           # anything COM: don't let a faster path break a tool
+            self._rules_off = describe_com_error(e)[:160]
+            return None
+
+    def _read_brep(self, what: str, path="") -> list | None:
+        """Faces or edges ("what") of the active part or of a component, read inside Inventor:
+        [{"path", "bodies": [[row, …], …]}], in the order the COM code walks them."""
+        got = self._inside("read_brep.iLogicVb", what=what, path=str(path))
+        return None if got is None else got["leaves"]
+
+    def _walk(self) -> dict | None:
+        """The active assembly's first-level components ("top") and the file of every part
+        occurrence at any depth ("files"), read inside Inventor."""
+        return self._inside("read_brep.iLogicVb", what="walk")
+
     def _run_rule(self, doc, rule: str, **arguments) -> dict:
         """Run rules/<rule> on doc inside Inventor and return the JSON it hands back in the
         argument "result". (Not through a file: a rule that writes one gets iLogic's Security
@@ -71,16 +145,32 @@ class ScanMixin:
         except Exception as e:
             raise RuntimeError("This needs Inventor's iLogic add-in (Tools > Add-Ins > iLogic), and it could "
                                f"not be reached: {describe_com_error(e)}") from None
+        # iLogic shows its own dialogs for a rule that does not compile or fails ("Rule Compile
+        # Errors …", "Error on line …") — Inventor's SilentOperation does not stop those, and the
+        # call waits behind them. Its own SilentOperation does: the call then comes straight
+        # back with an error code. Without that switch a rule is not run at all.
+        try:
+            was_silent = bool(automation.SilentOperation)
+            automation.SilentOperation = True
+        except Exception:
+            raise RuntimeError("This Inventor's iLogic can't be kept from showing error dialogs "
+                               "(no Automation.SilentOperation), so rules are not run on it") from None
         args = self.app.TransientObjects.CreateNameValueMap()
         for key, value in arguments.items():
             args.Add(key, value)
-        self._silently(lambda: automation.RunExternalRuleWithArguments(doc, rule_path, args))
+        try:
+            code = self._silently(lambda: automation.RunExternalRuleWithArguments(doc, rule_path, args))
+        finally:
+            try:
+                automation.SilentOperation = was_silent
+            except Exception:
+                pass
         try:
             text = args.Item("result")
         except Exception:
-            raise RuntimeError(f"The rule {rule} gave no result — it did not run to its end. iLogic may have "
-                               "refused it (Tools > Options > iLogic Configuration > security), or it does "
-                               "not compile on this Inventor.") from None
+            raise RuntimeError(f"The rule {rule} gave no result (iLogic answered {code!r}) — it did not run "
+                               "to its end: it does not compile on this Inventor, or iLogic refused it "
+                               "(Tools > Options > iLogic Configuration > security).") from None
         result = json.loads(text)
         if "error" in result:
             raise RuntimeError(f"The rule {rule} failed inside Inventor: {result['error'][:600]}")
@@ -100,7 +190,8 @@ class ScanMixin:
         documents = walk["documents"]
         parts, fresh = {}, []
         for path, state in documents.items():
-            cached = None if (refresh or state["dirty"] or not path) else cache_get(path, version)
+            cached = None if (refresh or state["dirty"] or path.startswith("unsaved:")) \
+                else cache_get(path, version)
             if cached is None:
                 fresh.append(path)
             else:
@@ -109,10 +200,11 @@ class ScanMixin:
             scanned = self._run_rule(doc, rule, files="|".join(p for p in fresh if p))["parts"]
             for path, part in scanned.items():
                 parts[path] = part
-                if path and not documents[path]["dirty"]:
+                if path and not path.startswith("unsaved:") and not documents[path]["dirty"]:
                     cache_put(path, version, part)
         if doc.DocumentType == kPartDocumentObject:
-            occurrences = [{"path": doc.DisplayName, "file": doc.FullFileName, "visible": True, "m": IDENTITY}]
+            occurrences = [{"path": doc.DisplayName, "file": next(iter(documents), ""), "visible": True,
+                            "m": IDENTITY}]
         else:
             occurrences = walk.get("occurrences", [])
         return {"occurrences": occurrences, "parts": parts, "documents": documents,
@@ -158,8 +250,10 @@ class ScanMixin:
         notes = []
         if skipped:
             notes.append(f"{skipped} planar face(s) could not be read and were left out")
-        if any(not path for path in scan["documents"]):
-            notes.append("Parts that were never saved are not told apart — save them first")
+        unread = sorted({o["path"] for o in occs if o["file"] not in scan["parts"]})
+        if unread:
+            notes.append(f"{len(unread)} component(s) could not be read and were left out: "
+                         + ", ".join(unread[:8]))
         for key in ("misaligned", "stud_does_not_fit", "blocked", "open"):
             if out[key + "_count"] > limit:
                 notes.append(f"{key}: the first {limit} of {out[key + '_count']} — narrow it down with `parts`")

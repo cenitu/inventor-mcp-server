@@ -880,7 +880,17 @@ class AssemblyMixin:
             "constraints": comp.Constraints.Count,
             "components": [],
         }
-        for i in range(1, comp.Occurrences.Count + 1):
+        walk = self._walk()   # read inside Inventor; through COM it is several calls per component
+        for i, (name, x, y, z, grounded, path, kind, inside) in enumerate(walk["top"] if walk else (), 1):
+            row = {"index": i, "name": name,
+                   "position_mm": [round(x * 10, 3), round(y * 10, 3), round(z * 10, 3)],
+                   "grounded": bool(grounded)}
+            if path:
+                row["file"] = os.path.basename(path)
+            if kind == kAssemblyDocumentObject and inside >= 0:
+                row["sub_assembly_parts"] = inside
+            info["components"].append(row)
+        for i in range(1, comp.Occurrences.Count + 1) if walk is None else ():
             occ = comp.Occurrences.Item(i)
             t = occ.Transformation.Translation
             row = {
@@ -900,12 +910,15 @@ class AssemblyMixin:
             info["components"].append(row)
         # every part at any depth, and how often each file is used
         try:
-            leaves = comp.Occurrences.AllLeafOccurrences
             uses = {}
-            for i in range(1, leaves.Count + 1):
-                key = self._occurrence_file(leaves.Item(i)) or leaves.Item(i).Name
+            files = walk["files"] if walk else None
+            if files is None:
+                leaves = comp.Occurrences.AllLeafOccurrences
+                files = [self._occurrence_file(leaves.Item(i)) or "?" + leaves.Item(i).Name
+                         for i in range(1, leaves.Count + 1)]
+            for key in files:
                 uses[key] = uses.get(key, 0) + 1
-            info["parts_total"] = leaves.Count
+            info["parts_total"] = len(files)
             info["parts_different"] = len(uses)
             top = sorted(uses.items(), key=lambda kv: (-kv[1], kv[0]))
             info["most_used"] = [{"file": os.path.basename(f), "count": n} for f, n in top[:15] if n > 1]

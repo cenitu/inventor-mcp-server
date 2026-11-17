@@ -683,10 +683,155 @@ check("a scan is kept per file", scan_mod.cache_get(part_file, "rule-a") == {"fa
 check("…and not used for another version of the rule", scan_mod.cache_get(part_file, "rule-b") is None)
 open(part_file, "w").write("version two")
 check("…nor once the file has changed", scan_mod.cache_get(part_file, "rule-a") is None)
-rule_text = open(os.path.join(ROOT, "inventor_mcp_server", "rules", "scan_planar.iLogicVb"), encoding="utf-8").read()
-code = "\n".join(l for l in rule_text.split("\n") if not l.lstrip().startswith("'"))
-check("the rule touches no file and starts nothing (iLogic's Security Alert would hold the call)",
-      not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject", "Registry", "WebClient")))
+
+print("Reading inside Inventor gives what reading through COM gives (fake Inventor objects):")
+
+
+def _xyz(x, y, z):
+    return Fake(X=x, Y=y, Z=z)
+
+
+def _fake_face(row):
+    """The COM face that read_brep.iLogicVb would describe with this row."""
+    st = row[0]
+    geometry = Fake()
+    if st == 5890:
+        geometry = Fake(Normal=_xyz(*row[8:11]))
+    elif st in (5891, 5893):
+        geometry = Fake(AxisVector=_xyz(*row[8:11]), BasePoint=_xyz(*row[11:14]),
+                        Radius=row[14] if st == 5891 else None)
+    return Fake(SurfaceType=st, IsParamReversed=bool(row[11]) if st == 5890 else False, Geometry=geometry,
+                Evaluator=Fake(Area=row[1], RangeBox=Fake(MinPoint=_xyz(*row[2:5]), MaxPoint=_xyz(*row[5:8]))))
+
+
+def _fake_edge(row):
+    if row[0] == 5124:
+        return Fake(GeometryType=5124, Geometry=Fake(Radius=row[1], Center=_xyz(*row[2:5])))
+    return Fake(GeometryType=row[0], StartVertex=Fake(Point=_xyz(*row[1:4])), StopVertex=Fake(Point=_xyz(*row[4:7])))
+
+
+reader = api.InventorConnection()
+face_rows = [
+    [5890, 12.345678, -1.23456789, 0.5, 2.000049999, 3.3333333, 0.5, 7.77775, 0.0, -0.70710678, 0.70710678, 1],
+    [5890, 4.0, 0, 0, 0, 2, 2, 0, 0.0, 0.0, 1.0, 0],
+    [5891, 3.14159265, 1.0, 1.0, 0.0, 1.6, 1.6, 0.21, 0.0, 0.0, -1.0, 1.3, 1.3, 0.0, 0.3250004],
+    [5893, 0.9, 1.0, 1.0, 0.0, 1.6, 1.6, 0.2, 0.0, 1.0, 0.0, 1.3, 1.3, 0.0],
+    [5895, 2.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+    [5899, 1.0, 0, 0, 0, 1, 1, 1],            # a surface type the table does not name
+]
+check("a face read inside Inventor is described exactly as one read through COM",
+      all(scan_mod.face_info(r, reader._SURFACES) == reader._face_info(_fake_face(r)) for r in face_rows),
+      str([(scan_mod.face_info(r, reader._SURFACES), reader._face_info(_fake_face(r))) for r in face_rows
+           if scan_mod.face_info(r, reader._SURFACES) != reader._face_info(_fake_face(r))][:1]))
+edge_rows = [[5124, 0.3250004, 1.23456789, -2.5, 0.0], [5123, 0.0, 0.0, 0.0, 1.23456789, 2.0, -0.5],
+             [5125, 1.0, 0.0, 0.0, 0.0, 1.0, 0.33335], [5128, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]]
+check("…and so is an edge",
+      all(scan_mod.edge_info(r) == reader._edge_info(_fake_edge(r)) for r in edge_rows))
+
+# find_faces / find_edges: rows, refs and order from the rule's answer; COM when there is none
+calls = []
+answer = {"leaves": [{"path": "Sub:1/Plate:1", "bodies": [[face_rows[1], face_rows[2]], [face_rows[0]]]},
+                     {"path": "Sub:1/Pin:1", "bodies": [[face_rows[2]]]}]}
+reader._app = Fake(ActiveDocument=Fake(DocumentType=12291, ComponentDefinition=Fake()))
+reader._run_rule = lambda doc, rule, **kw: calls.append((rule, kw)) or answer
+rows = reader.find_faces("Sub:1", max_count=99)
+check("find_faces builds the refs constrain takes: path, body, face index",
+      [r["ref"] for r in rows] == ["Sub:1/Plate:1#F1", "Sub:1/Plate:1#F2", "Sub:1/Plate:1#B2F1", "Sub:1/Pin:1#F1"]
+      and calls == [("read_brep.iLogicVb", {"what": "faces", "path": "Sub:1"})], str([r["ref"] for r in rows]))
+check("find_faces filters and stops at max_count like the COM code",
+      [r["ref"] for r in reader.find_faces("Sub:1", surface="cylinder", diameter=6.5)] == ["Sub:1/Plate:1#F2", "Sub:1/Pin:1#F1"]
+      and len(reader.find_faces("Sub:1", max_count=2)) == 2
+      and [r["ref"] for r in reader.find_faces("Sub:1", surface="plane", normal=[0, 0, 1])] == ["Sub:1/Plate:1#F1"])
+edge_answer = {"leaves": [{"path": "Plate:1", "bodies": [edge_rows[:2], [edge_rows[0]]]}]}
+reader._run_rule = lambda doc, rule, **kw: edge_answer
+check("find_edges builds edge refs the same way",
+      [r["ref"] for r in reader.find_edges("Plate:1", circular=True)] == ["Plate:1#E1", "Plate:1#B2E1"])
+
+com_calls = []
+reader._find_faces_com = lambda *a, **kw: com_calls.append(a) or ["through COM"]
+
+
+def _refuses(doc, rule, **kw):
+    raise RuntimeError("The rule read_brep.iLogicVb failed inside Inventor: No occurrence 'x'")
+
+
+reader._run_rule = _refuses
+check("a request the rule can't do goes through COM, and rules stay on",
+      reader.find_faces("x") == ["through COM"] and reader.reading_mode().startswith("inside"), reader.reading_mode())
+
+
+def _no_ilogic(doc, rule, **kw):
+    raise RuntimeError("This needs Inventor's iLogic add-in (Tools > Add-Ins > iLogic), and it could not be reached")
+
+
+reader._run_rule = _no_ilogic
+check("without iLogic everything goes through COM from then on, and get_status would say why",
+      reader.find_faces("Sub:1") == ["through COM"] and "iLogic add-in" in reader.reading_mode()
+      and reader.reading_mode().startswith("through COM"), reader.reading_mode())
+reader._run_rule = lambda doc, rule, **kw: 1 / 0     # must not be called any more
+check("…without asking the rule again", reader.find_faces("Sub:1") == ["through COM"])
+os.environ["INVENTOR_MCP_RULES"] = "0"
+other = api.InventorConnection()
+check("INVENTOR_MCP_RULES=0 turns the rules off", other.reading_mode() == "through COM (INVENTOR_MCP_RULES=0)")
+del os.environ["INVENTOR_MCP_RULES"]
+for rule_name in ("read_brep.iLogicVb", "scan_planar.iLogicVb"):
+    text = open(os.path.join(ROOT, "inventor_mcp_server", "rules", rule_name), encoding="utf-8").read()
+    code = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("'"))
+    check(f"{rule_name} touches no file and starts nothing",
+          not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject", "Registry", "WebClient")))
+
+# running a rule: iLogic's own silent mode on for the call, put back after it
+class FakeAutomation:
+    def __init__(self, result=None, silent=False):
+        self.SilentOperation, self.result, self.seen = silent, result, []
+
+    def RunExternalRuleWithArguments(self, doc, path, args):
+        self.seen.append(self.SilentOperation)
+        if self.result is not None:
+            args.values["result"] = self.result
+        return 0 if self.result is not None else -1
+
+
+class FakeArgs:
+    def __init__(self):
+        self.values = {}
+
+    def Add(self, key, value):
+        self.values[key] = value
+
+    def Item(self, key):
+        return self.values[key]
+
+
+def runner(automation):
+    c = api.InventorConnection()
+    c._app = Fake(SilentOperation=False, TransientObjects=Fake(CreateNameValueMap=FakeArgs),
+                  ApplicationAddIns=Fake(ItemById=lambda _id: Fake(Activated=True, Automation=automation)))
+    return c
+
+
+quiet = FakeAutomation(result='{"leaves": []}')
+got = runner(quiet)._run_rule(None, "read_brep.iLogicVb", what="faces")
+check("a rule runs with iLogic's own SilentOperation on, and the user's setting comes back after",
+      got == {"leaves": []} and quiet.seen == [True] and quiet.SilentOperation is False, str((got, quiet.seen)))
+ok, why = raises(lambda: runner(FakeAutomation())._run_rule(None, "read_brep.iLogicVb"), "gave no result (iLogic answered -1)")
+check("a rule that does not compile is an error, not a wait", ok, why)
+no_switch = Fake(RunExternalRuleWithArguments=lambda *a: 1 / 0)   # an iLogic without SilentOperation
+ok, why = raises(lambda: runner(no_switch)._run_rule(None, "read_brep.iLogicVb"), "can't be kept from showing error dialogs")
+check("without that switch no rule is run", ok, why)
+old_ilogic = runner(no_switch)
+old_ilogic._app.ActiveDocument = Fake(DocumentType=12290, ComponentDefinition=Fake())
+old_ilogic._find_faces_com = lambda *a, **kw: ["through COM"]
+check("…and find_faces reads through COM on such an Inventor",
+      old_ilogic.find_faces() == ["through COM"] and "error dialogs" in old_ilogic.reading_mode(), old_ilogic.reading_mode())
+
+clean = Fake(Dirty=False)
+clean.Update = lambda: setattr(clean, "Dirty", True)
+reader._fresh_mass(clean, Fake(MassProperties=Fake()))
+edited = Fake(Dirty=True, Update=lambda: None)
+reader._fresh_mass(edited, Fake(MassProperties=Fake()))
+check("recomputing the mass leaves a clean document clean, and an edited one as it was",
+      clean.Dirty is False and edited.Dirty is True)
 
 print("Resources:")
 listed = asyncio.run(pkg.mcp.list_resources())

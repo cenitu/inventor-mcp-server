@@ -619,7 +619,24 @@ Measured on Inventor 2027.1, a 174-face part, every face, loop and edge read onc
   `RuleArguments.Arguments.Value("result") = text` in the rule, `args.Item("result")` after the
   call. A rule that uses `System.IO` gets iLogic's **Security Alert** ("Run the rule / Don't run
   the rule"), and under `SilentOperation` that dialog holds the call until someone clicks it.
-- A rule does not mark the document dirty by reading it.
+- **iLogic shows its own error dialogs**, whatever `app.SilentOperation` says: "Rule Compile
+  Errors in …" for a rule that does not compile, "Error on line … in rule …" for one that fails.
+  The call waits behind them. `addin.Automation.SilentOperation = True` stops both: the call
+  returns at once with a negative code (and 0 when the rule ran). Set it for the call and put the
+  old value back — it is the user's iLogic too. A rule file that is not there shows no dialog.
+- A rule does not mark the document dirty by reading it. **`Document.Update()` does**, on an
+  assembly, even when nothing was out of date — so a "read" that recomputes (fresh mass
+  properties) leaves Inventor asking to save. `Document.Dirty` can be set back to `False`.
+- **A face's `Evaluator.RangeBox` is a box along the axes of the context it is asked in.** For a
+  component it is in assembly coordinates, and its middle is not the part-space middle moved by
+  the component's transform (unless the component is turned by right angles only). Read the
+  component as placed (`occurrence.SurfaceBodies`) when the answer must match — that also sees
+  assembly-level cuts, which the part file does not have.
+- Numbers handed back by a rule: format with `"G17"` and the invariant culture, and the double
+  read in Python is the one Inventor had; round in one place only.
+- `Document.FullDocumentName` is the file plus the model state (`…\part.ipt<Flat>`);
+  `FullFileName` is the file alone, the same for every model state. A never-saved document has
+  neither: `InternalName` tells those apart.
 - **An inner loop of a face is not always a hole.** It also runs around whatever stands on
   the face: a locating pin, a welded stud, an embossed form. To tell them apart, take two
   points just under the face, one on each side of the loop's wall

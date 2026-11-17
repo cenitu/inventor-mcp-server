@@ -6,7 +6,7 @@ module per area. Reloading this module (the reload_api tool) reloads every part 
 import importlib
 import sys
 
-_PARTS = ("api_common", "flat_checks", "api_documents", "api_sketch", "api_features", "api_sheet_metal", "api_views", "api_outputs", "api_library", "api_assembly", "api_tools", "alignment", "api_scan")
+_PARTS = ("api_common", "flat_checks", "api_documents", "api_sketch", "api_features", "api_sheet_metal", "api_views", "api_outputs", "api_library", "api_assembly", "alignment", "api_scan", "api_tools")
 
 
 def _part(name):

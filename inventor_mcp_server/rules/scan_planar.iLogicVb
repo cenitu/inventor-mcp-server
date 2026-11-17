@@ -8,7 +8,7 @@
 ' and under SilentOperation that alert would hold the call until someone clicks it.
 '
 ' Arguments:
-'   files  optional: full file names of the parts to scan, separated by "|".
+'   files  optional: the documents to scan (their keys, see Key below), separated by "|".
 '          Absent = every part; present but empty = none (only the walk below).
 '   walk   optional, "1": for an assembly also list every part occurrence with its transform.
 '
@@ -49,17 +49,17 @@ Sub Main()
                 content = d.ComponentDefinition.IsContentMember
             Catch
             End Try
-            sb.Append(Q(d.FullFileName)).Append(":{""dirty"":").Append(B(d.Dirty)).Append(",""content"":").Append(B(content)).Append("}")
+            sb.Append(Q(Key(d))).Append(":{""dirty"":").Append(B(d.Dirty)).Append(",""content"":").Append(B(content)).Append("}")
         Next
 
         sb.Append("},""parts"":{")
         Dim firstPart As Boolean = True
         For Each d As Inventor.Document In docs
             If d.DocumentType <> DocumentTypeEnum.kPartDocumentObject Then Continue For
-            If Not all AndAlso Not want.Contains(d.FullFileName) Then Continue For
+            If Not all AndAlso Not want.Contains(Key(d)) Then Continue For
             If Not firstPart Then sb.Append(",")
             firstPart = False
-            sb.Append(Q(d.FullFileName)).Append(":")
+            sb.Append(Q(Key(d))).Append(":")
             AppendPart(sb, d)
         Next
         sb.Append("}")
@@ -70,7 +70,7 @@ Sub Main()
             Dim asm As AssemblyDocument = doc
             For Each o As ComponentOccurrence In asm.ComponentDefinition.Occurrences.AllLeafOccurrences
                 Try
-                    Dim file As String = o.ReferencedDocumentDescriptor.FullDocumentName
+                    Dim file As String = Key(o.Definition.Document)
                     Dim m As Matrix = o.Transformation
                     Dim path As String = ""
                     For Each link As ComponentOccurrence In o.OccurrencePath
@@ -105,6 +105,19 @@ Sub Main()
     End Try
     RuleArguments.Arguments.Value("result") = sb.ToString()
 End Sub
+
+' One name per document, the same wherever it is asked for: the full document name (the file,
+' plus the model state when there is one), or for a part that was never saved its internal name.
+Function Key(d As Inventor.Document) As String
+    Dim name As String = ""
+    Try
+        name = d.FullDocumentName
+    Catch
+    End Try
+    If name = "" Then name = d.FullFileName
+    If name = "" Then name = "unsaved:" & d.InternalName
+    Return name
+End Function
 
 Sub AppendPart(sb As System.Text.StringBuilder, d As Inventor.Document)
     Dim part As PartDocument = d

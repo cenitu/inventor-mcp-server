@@ -41,7 +41,7 @@ Register the server in your MCP client by the **absolute path** to `inventor_mcp
 | `inventor_mcp_server/inventor_api.py` | `InventorConnection` — all COM / geometry logic, **millimetre** interface. The class is put together from the `api_*.py` parts |
 | `inventor_mcp_server/api_*.py` | The parts, one per area: `api_documents`, `api_sketch`, `api_features`, `api_sheet_metal`, `api_assembly`, `api_views`, `api_outputs` (flat pattern, BOM, drawings, checks), `api_library` (Content Center, frames, vendor surfaces), `api_tools`; `api_common` holds constants and error helpers |
 | `inventor_mcp_server/flat_checks.py` | Flat pattern checks — plain 2D geometry, tested without Inventor |
-| `inventor_mcp_server/api_scan.py`, `rules/*.iLogicVb` | Reading geometry in bulk: a rule run inside Inventor (about 190 times faster than the same scan through COM), its result kept per file on disk |
+| `inventor_mcp_server/api_scan.py`, `rules/*.iLogicVb` | Reading geometry in bulk: a rule run inside Inventor (about 190 times faster than the same scan through COM). `read_brep` answers `find_faces` / `find_edges` / the assembly snapshot and must give exactly what the COM code gives (the smoke tests compare the two); `scan_planar` feeds the hole check and is kept per file on disk |
 | `inventor_mcp_server/alignment.py` | Holes of parts that lie on each other — plain geometry, tested without Inventor |
 | `inventor_mcp_server/server.py` | MCP tool definitions — thin wrappers that parse arguments and call the API |
 | `tests/check_server.py` | Checks that need no Inventor (runs in CI) |

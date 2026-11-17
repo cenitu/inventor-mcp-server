@@ -180,6 +180,23 @@ def part_tests(inv, run):
     run.step("unsuppress feature", lambda: inv.suppress_feature([3], False))
     run.step("delete feature", lambda: inv.delete_feature([3]))
 
+    def part_read_both_ways():
+        """An unsaved part: faces and edges read inside Inventor and through COM are the same."""
+        if not inv.reading_mode().startswith("inside"):
+            _raise("not reading inside Inventor: " + inv.reading_mode())
+        inside = (inv.find_faces(max_count=10 ** 6), inv.find_edges(max_count=10 ** 6),
+                  inv.find_edges(circular=True, diameter=4))
+        inv._rules_off = "comparison"
+        try:
+            through_com = (inv.find_faces(max_count=10 ** 6), inv.find_edges(max_count=10 ** 6),
+                           inv.find_edges(circular=True, diameter=4))
+        finally:
+            inv._rules_off = ""
+        if inside != through_com or not inside[0] or not inside[2]:
+            _raise(f"inside {str(inside)[:300]} / COM {str(through_com)[:300]}")
+        return f"{len(inside[0])} faces, {len(inside[1])} edges, the same both ways"
+    run.step("find_faces / find_edges: inside Inventor = through COM", part_read_both_ways)
+
     def grid_and_mirror():
         import math
         inv.create_part("smoke_grid")
