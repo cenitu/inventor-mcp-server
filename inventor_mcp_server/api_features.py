@@ -398,11 +398,24 @@ class FeaturesMixin:
     @staticmethod
     def _fresh_mass(doc, comp):
         """MassProperties recomputed now. An assembly otherwise returns the value cached in
-        the file — stale after its sub-assemblies changed (3607 kg vs 3343 kg seen)."""
+        the file — stale after its sub-assemblies changed (3607 kg vs 3343 kg seen).
+        The recompute marks a document as changed although nothing in it was edited; a
+        document that was clean stays clean, so that looking at a model does not leave
+        Inventor asking to save it."""
+        try:
+            clean = not doc.Dirty
+        except Exception:
+            clean = False
         try:
             doc.Update()
         except Exception:
             pass
+        if clean:
+            try:
+                if doc.Dirty:
+                    doc.Dirty = False
+            except Exception:
+                pass
         mp = comp.MassProperties
         for prop, value in (("CacheResultsOnCompute", False), ("Accuracy", 25603)):  # kHigh
             try:

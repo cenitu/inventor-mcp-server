@@ -1,0 +1,225 @@
+' Faces or edges of the active part, or of a component of the active assembly, read inside
+' Inventor. Run by inventor_mcp_server/api_scan.py; the same walk through COM from Python
+' takes minutes on a large component (32 s for one 134-face part, measured).
+'
+' It reads what the COM code reads, in the same order and with the same indices, and hands
+' the numbers back unrounded (cm, as the API gives them): Python rounds and filters, so the
+' answer is the same whichever way it was read. In an assembly it reads the component as
+' placed (occurrence geometry, top assembly coordinates), so assembly cuts are seen.
+'
+' The result is JSON in the argument "result"; the rule writes no file (see scan_planar).
+'
+' Arguments:
+'   what   "faces", "edges" or "walk" (walk: the first-level components, and the file of
+'          every part occurrence at any depth)
+'   path   assembly only: component name, path ("Sub:1/Part:1") or index; not for "walk"
+'
+' faces: one array per face  [surfaceType, area, minX, minY, minZ, maxX, maxY, maxZ, ...]
+'        plane:    ..., nx, ny, nz, reversed(0|1)
+'        cylinder: ..., ax, ay, az, bx, by, bz, radius        cone: ..., ax, ay, az, bx, by, bz
+' edges: one array per edge  circle: [5124, radius, cx, cy, cz]   other: [type, ax, ay, az, bx, by, bz]
+
+Sub Main()
+    Dim sb As New System.Text.StringBuilder()
+    Try
+        Dim doc As Inventor.Document = ThisDoc.Document
+        Dim what As String = CStr(RuleArguments("what"))
+        If what = "walk" Then
+            Dim asmDoc As AssemblyDocument = doc
+            ' first-level components: [name, x, y, z (cm), grounded, file, document type, parts inside or -1]
+            sb.Append("{""top"":[")
+            Dim occs As ComponentOccurrences = asmDoc.ComponentDefinition.Occurrences
+            For i As Integer = 1 To occs.Count
+                Dim o As ComponentOccurrence = occs.Item(i)
+                Dim t As Vector = o.Transformation.Translation
+                Dim file As String = ""
+                Try
+                    file = o.ReferencedDocumentDescriptor.FullDocumentName
+                Catch
+                    Try
+                        file = o.Definition.Document.FullFileName
+                    Catch
+                    End Try
+                End Try
+                Dim kind As Integer = CInt(o.DefinitionDocumentType)
+                Dim inside As Integer = -1
+                If kind = 12291 Then
+                    Try
+                        inside = o.Definition.Occurrences.AllLeafOccurrences.Count
+                    Catch
+                    End Try
+                End If
+                If i > 1 Then sb.Append(",")
+                sb.Append("[").Append(Q(o.Name)).Append(",").Append(R(t.X)).Append(",").Append(R(t.Y)).Append(",").Append(R(t.Z))
+                sb.Append(",").Append(If(o.Grounded, "1", "0")).Append(",").Append(Q(file)).Append(",").Append(kind.ToString())
+                sb.Append(",").Append(inside.ToString()).Append("]")
+            Next
+            sb.Append("],""files"":[")
+            Dim firstFile As Boolean = True
+            For Each o As ComponentOccurrence In asmDoc.ComponentDefinition.Occurrences.AllLeafOccurrences
+                Dim name As String = ""
+                Try
+                    name = o.ReferencedDocumentDescriptor.FullDocumentName
+                Catch
+                    Try
+                        name = o.Definition.Document.FullFileName
+                    Catch
+                    End Try
+                End Try
+                If name = "" Then name = "?" & o.Name
+                If Not firstFile Then sb.Append(",")
+                firstFile = False
+                sb.Append(Q(name))
+            Next
+            sb.Append("]}")
+        Else
+            sb.Append("{""leaves"":[")
+            If doc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+                Dim part As PartDocument = doc
+                AppendLeaf(sb, "", part.ComponentDefinition.SurfaceBodies, what)
+            Else
+                Dim asm As AssemblyDocument = doc
+                Dim path As String = CStr(RuleArguments("path"))
+                Dim occ As ComponentOccurrence = Find(asm.ComponentDefinition, path)
+                Dim first As Boolean = True
+                Walk(sb, occ, path, what, first)
+            End If
+            sb.Append("]}")
+        End If
+    Catch ex As Exception
+        sb.Clear()
+        sb.Append("{""error"":").Append(Q(ex.Message)).Append("}")
+    End Try
+    RuleArguments.Arguments.Value("result") = sb.ToString()
+End Sub
+
+' The occurrence a path names, found the way InventorConnection._occ finds it.
+Function Find(comp As AssemblyComponentDefinition, path As String) As ComponentOccurrence
+    Dim number As Integer
+    If path.Length > 0 AndAlso Integer.TryParse(path, number) AndAlso path.Trim("0123456789".ToCharArray()).Length = 0 Then
+        Return comp.Occurrences.Item(number)
+    End If
+    Dim occ As ComponentOccurrence = Nothing
+    For Each part As String In path.Split("/"c)
+        Dim found As ComponentOccurrence = Nothing
+        If occ Is Nothing Then
+            For Each o As ComponentOccurrence In comp.Occurrences
+                If o.Name = part Then
+                    found = o
+                    Exit For
+                End If
+            Next
+        Else
+            For Each o As ComponentOccurrence In occ.SubOccurrences
+                If o.Name = part Then
+                    found = o
+                    Exit For
+                End If
+            Next
+        End If
+        If found Is Nothing Then Throw New System.Exception("No occurrence '" & part & "'")
+        occ = found
+    Next
+    Return occ
+End Function
+
+' Part occurrences at and below occ, in the order InventorConnection._leaves gives them.
+Sub Walk(sb As System.Text.StringBuilder, occ As ComponentOccurrence, path As String, what As String, ByRef first As Boolean)
+    Dim subs As ComponentOccurrencesEnumerator = occ.SubOccurrences
+    If subs.Count > 0 Then
+        For i As Integer = 1 To subs.Count
+            Dim s As ComponentOccurrence = subs.Item(i)
+            Walk(sb, s, path & "/" & s.Name, what, first)
+        Next
+    Else
+        If Not first Then sb.Append(",")
+        first = False
+        AppendLeaf(sb, path, occ.SurfaceBodies, what)
+    End If
+End Sub
+
+Sub AppendLeaf(sb As System.Text.StringBuilder, path As String, bodies As SurfaceBodies, what As String)
+    sb.Append("{""path"":").Append(Q(path)).Append(",""bodies"":[")
+    For bi As Integer = 1 To bodies.Count
+        If bi > 1 Then sb.Append(",")
+        sb.Append("[")
+        Dim body As SurfaceBody = bodies.Item(bi)
+        If what = "faces" Then
+            Dim faces As Faces = body.Faces
+            For fi As Integer = 1 To faces.Count
+                If fi > 1 Then sb.Append(",")
+                AppendFace(sb, faces.Item(fi))
+            Next
+        Else
+            Dim edges As Edges = body.Edges
+            For ei As Integer = 1 To edges.Count
+                If ei > 1 Then sb.Append(",")
+                AppendEdge(sb, edges.Item(ei))
+            Next
+        End If
+        sb.Append("]")
+    Next
+    sb.Append("]}")
+End Sub
+
+Sub AppendFace(sb As System.Text.StringBuilder, f As Face)
+    Dim st As Integer = CInt(f.SurfaceType)
+    Dim rb As Box = f.Evaluator.RangeBox
+    sb.Append("[").Append(st.ToString()).Append(",").Append(R(f.Evaluator.Area))
+    sb.Append(",").Append(R(rb.MinPoint.X)).Append(",").Append(R(rb.MinPoint.Y)).Append(",").Append(R(rb.MinPoint.Z))
+    sb.Append(",").Append(R(rb.MaxPoint.X)).Append(",").Append(R(rb.MaxPoint.Y)).Append(",").Append(R(rb.MaxPoint.Z))
+    If st = 5890 Then
+        Dim g As Plane = f.Geometry
+        sb.Append(",").Append(R(g.Normal.X)).Append(",").Append(R(g.Normal.Y)).Append(",").Append(R(g.Normal.Z))
+        sb.Append(",").Append(If(f.IsParamReversed, "1", "0"))
+    ElseIf st = 5891 Then
+        Dim c As Cylinder = f.Geometry
+        sb.Append(",").Append(R(c.AxisVector.X)).Append(",").Append(R(c.AxisVector.Y)).Append(",").Append(R(c.AxisVector.Z))
+        sb.Append(",").Append(R(c.BasePoint.X)).Append(",").Append(R(c.BasePoint.Y)).Append(",").Append(R(c.BasePoint.Z))
+        sb.Append(",").Append(R(c.Radius))
+    ElseIf st = 5893 Then
+        Dim k As Cone = f.Geometry
+        sb.Append(",").Append(R(k.AxisVector.X)).Append(",").Append(R(k.AxisVector.Y)).Append(",").Append(R(k.AxisVector.Z))
+        sb.Append(",").Append(R(k.BasePoint.X)).Append(",").Append(R(k.BasePoint.Y)).Append(",").Append(R(k.BasePoint.Z))
+    End If
+    sb.Append("]")
+End Sub
+
+Sub AppendEdge(sb As System.Text.StringBuilder, e As Edge)
+    Dim kind As Integer = CInt(e.GeometryType)
+    If kind = 5124 Then
+        Dim c As Inventor.Circle = e.Geometry
+        sb.Append("[5124,").Append(R(c.Radius)).Append(",").Append(R(c.Center.X)).Append(",").Append(R(c.Center.Y)).Append(",").Append(R(c.Center.Z)).Append("]")
+    Else
+        Dim a As Inventor.Point = e.StartVertex.Point
+        Dim b As Inventor.Point = e.StopVertex.Point
+        sb.Append("[").Append(kind.ToString())
+        sb.Append(",").Append(R(a.X)).Append(",").Append(R(a.Y)).Append(",").Append(R(a.Z))
+        sb.Append(",").Append(R(b.X)).Append(",").Append(R(b.Y)).Append(",").Append(R(b.Z)).Append("]")
+    End If
+End Sub
+
+' A number that reads back as exactly the same double.
+Function R(v As Double) As String
+    Return v.ToString("G17", System.Globalization.CultureInfo.InvariantCulture)
+End Function
+
+Function Q(s As String) As String
+    Dim sb As New System.Text.StringBuilder("""")
+    For Each ch As Char In s
+        Select Case ch
+            Case """"c
+                sb.Append("\""")
+            Case "\"c
+                sb.Append("\\")
+            Case Else
+                If AscW(ch) < 32 Then
+                    sb.Append("\u" & AscW(ch).ToString("x4"))
+                Else
+                    sb.Append(ch)
+                End If
+        End Select
+    Next
+    sb.Append("""")
+    Return sb.ToString()
+End Function

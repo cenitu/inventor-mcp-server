@@ -2,9 +2,11 @@
 if __package__:
     from .api_common import *  # noqa: F401,F403
     from .flat_checks import flat_pattern_problems, rule_from_name  # noqa: F401
+    from . import api_scan as _scan
 else:  # server.py run as a script: the modules sit on sys.path
     from api_common import *  # noqa: F401,F403
     from flat_checks import flat_pattern_problems, rule_from_name  # noqa: F401
+    import api_scan as _scan
 
 
 class ToolsMixin:
@@ -12,7 +14,39 @@ class ToolsMixin:
 
     def find_faces(self, path="", surface="", normal=None, at=None, diameter=0.0, min_area=0.0,
                    max_count=30) -> list[dict]:
-        """Faces of a component (path) or of the active part's bodies, filtered."""
+        """Faces of a component (path) or of the active part's bodies, filtered. Read inside
+        Inventor when that is possible (a rule: seconds where COM takes minutes), else through
+        COM — same rows, same refs either way."""
+        self.active_assembly() if path else self.active_part()   # the same refusals as through COM
+        leaves = self._read_brep("faces", path)
+        if leaves is None:
+            return self._find_faces_com(path, surface, normal, at, diameter, min_area, max_count)
+        rows = []
+        for leaf in leaves:
+            for bi, faces in enumerate(leaf["bodies"], 1):
+                for fi, row in enumerate(faces, 1):
+                    if path:   # as assembly_faces: an unknown surface type never matches a name
+                        if surface and self._SURFACES.get(int(row[0]), "") != surface.lower():
+                            continue
+                        info = _scan.face_info(row, self._SURFACES)
+                        if not self._face_matches(info, "", normal, at, diameter, min_area, 0.05):
+                            continue
+                        info["ref"] = f"{leaf['path']}#{'B%d' % bi if bi > 1 else ''}F{fi}"
+                    else:
+                        info = _scan.face_info(row, self._SURFACES)
+                        if not self._face_matches(info, surface, normal, at, diameter, min_area, 0.05):
+                            continue
+                        info["index"] = fi
+                        if bi > 1:
+                            info["body"] = bi
+                    rows.append(info)
+                    if len(rows) >= max_count:
+                        return rows
+        return rows
+
+    def _find_faces_com(self, path="", surface="", normal=None, at=None, diameter=0.0, min_area=0.0,
+                        max_count=30) -> list[dict]:
+        """find_faces through COM: one call per face property."""
         if path:
             return self.assembly_faces(path, surface, normal, at, diameter, min_area, max_count)
         comp = self.active_part()
@@ -58,6 +92,23 @@ class ToolsMixin:
                                  for k, v in at.items())
 
         rows = []
+        self.active_assembly() if path else self.active_part()
+        leaves = self._read_brep("edges", path)
+        if leaves is not None:
+            for leaf in leaves:
+                for bi, edges in enumerate(leaf["bodies"], 1):
+                    for ei, row in enumerate(edges, 1):
+                        info = _scan.edge_info(row)
+                        if wanted(info):
+                            if path:
+                                info["ref"] = f"{leaf['path']}#{'B%d' % bi if bi > 1 else ''}E{ei}"
+                            else:
+                                info["index"] = ei
+                            rows.append(info)
+                            if len(rows) >= max_count:
+                                return rows
+            return rows
+        # through COM: one call per edge property
         sources = [(p, o.SurfaceBodies) for p, o in self._leaves(self._occ(path), path)] if path \
             else [("", self.active_part().SurfaceBodies)]
         for prefix, bodies in sources:

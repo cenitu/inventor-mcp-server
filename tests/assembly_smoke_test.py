@@ -195,6 +195,30 @@ def assembly_tests(inv, run, plate, pin):
             inv.delete_occurrence("smoke_plate:2", force=True)
     run.step("fastener_alignment: aligned, cached, then 2 mm off", hole_alignment)
 
+    def same_either_way():
+        """What is read inside Inventor is what the COM code reads: rows, refs, order."""
+        if not inv.reading_mode().startswith("inside"):
+            _raise("not reading inside Inventor: " + inv.reading_mode())
+        queries = {
+            "faces of the plate (it has an assembly cut)": lambda: inv.find_faces("smoke_plate:1", max_count=10 ** 6),
+            "edges of the plate": lambda: inv.find_edges("smoke_plate:1", max_count=10 ** 6),
+            "the cut's cylinder": lambda: inv.find_faces("smoke_plate:1", surface="cylinder", diameter=4),
+            "faces of the pin by index": lambda: inv.find_faces("2", max_count=10 ** 6),
+            "the assembly snapshot": lambda: [inv.assembly_info()],
+        }
+        inside = {k: q() for k, q in queries.items()}
+        inv._rules_off = "comparison"
+        try:
+            through_com = {k: q() for k, q in queries.items()}
+        finally:
+            inv._rules_off = ""
+        different = [k for k in queries if inside[k] != through_com[k]]
+        cut = inside["the cut's cylinder"]
+        if different or len(cut) != 1:
+            _raise(f"different: {different}; rows for the cut: {cut}")
+        return f"{len(inside['faces of the plate (it has an assembly cut)'])} faces, "                f"{len(inside['edges of the plate'])} edges, the same both ways"
+    run.step("read inside Inventor = read through COM", same_either_way)
+
     def deeper_info():
         info = inv.assembly_info()
         files = [c.get("file") for c in info["components"]]

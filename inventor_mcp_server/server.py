@@ -1126,7 +1126,8 @@ def get_status() -> str:
         info = inv.get_document_info()
     except RuntimeError:
         info = {"document": None}
-    info["inventor"] = {"instance": me.name, "pid": inv.pid, "project": inv.project_info()["name"]}
+    info["inventor"] = {"instance": me.name, "pid": inv.pid, "project": inv.project_info()["name"],
+                        "reading": inv.reading_mode()}
     defined = sorted(k for k in me.ns
                      if not k.startswith("__") and k not in ("inv", "app", "doc", "comp", "body", "tg", "math",
                                                              "progress", "cancelled"))
