@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.2.1 — 2026-11-17
+
+Faster reads and one fix; no tool is added or renamed (66).
+
 - **`find_faces`, `find_edges` and `inspect_model` read inside Inventor.** On a 396-part assembly:
   the faces of one 134-face part 22 s → 0.1 s, of a sub-assembly (604 faces) 89 s → 0.25 s, its
   circular edges 100 s → 0.15 s, the assembly snapshot 24 s → 4 s. The rows, refs and their order
