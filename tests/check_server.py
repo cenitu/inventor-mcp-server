@@ -75,7 +75,7 @@ read_only = sorted(t.name for t in pkg_tools   # by wire name: the attribute dif
                    if t.annotations and t.annotations.model_dump(by_alias=True).get("readOnlyHint"))
 check("the tools that only look are marked read-only, and no tool that changes something is",
       read_only == ["capture_view", "check_fastener_alignment", "check_interference", "check_sketch", "find_edges", "find_faces", "get_status",
-                    "inspect_model", "list_instances", "measure_distance"], str(read_only))
+                    "inspect_model", "list_instances", "measure_distance", "review_assembly"], str(read_only))
 
 print("Inventor thread (no Inventor needed):")
 import threading, time
@@ -757,7 +757,23 @@ def _refuses(doc, rule, **kw):
 
 reader._run_rule = _refuses
 check("a request the rule can't do goes through COM, and rules stay on",
-      reader.find_faces("x") == ["through COM"] and reader.reading_mode().startswith("inside"), reader.reading_mode())
+      reader.find_faces("x") == ["through COM"] and reader.reading_mode() == "inside Inventor (iLogic rules)",
+      reader.reading_mode())
+
+
+def _one_rule_broken(doc, rule, **kw):
+    if rule == "read_brep.iLogicVb":
+        raise RuntimeError("The rule read_brep.iLogicVb gave no result (iLogic answered -1) — it did not run to its end")
+    return {"parts": []}
+
+
+reader._run_rule = _one_rule_broken
+check("a rule that does not compile here is left alone, the other rules keep running",
+      reader.find_faces("Sub:1") == ["through COM"] and reader._read_parts() == []
+      and reader.reading_mode().startswith("inside Inventor (iLogic rules); not read_brep.iLogicVb"), reader.reading_mode())
+reader._run_rule = lambda doc, rule, **kw: 1 / 0 if rule == "read_brep.iLogicVb" else {"parts": []}
+check("…and it is not tried again", reader.find_faces("Sub:1") == ["through COM"])
+reader._rules_broken = {}
 
 
 def _no_ilogic(doc, rule, **kw):
@@ -774,11 +790,12 @@ os.environ["INVENTOR_MCP_RULES"] = "0"
 other = api.InventorConnection()
 check("INVENTOR_MCP_RULES=0 turns the rules off", other.reading_mode() == "through COM (INVENTOR_MCP_RULES=0)")
 del os.environ["INVENTOR_MCP_RULES"]
-for rule_name in ("read_brep.iLogicVb", "scan_planar.iLogicVb"):
+for rule_name in ("read_brep.iLogicVb", "read_parts.iLogicVb", "scan_planar.iLogicVb"):
     text = open(os.path.join(ROOT, "inventor_mcp_server", "rules", rule_name), encoding="utf-8").read()
     code = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("'"))
     check(f"{rule_name} touches no file and starts nothing",
-          not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject", "Registry", "WebClient")))
+          not any(word in code for word in ("System.IO", "Process", "Shell", "CreateObject(", "GetObject(",
+                                            "Registry", "WebClient")))
 
 # running a rule: iLogic's own silent mode on for the call, put back after it
 class FakeAutomation:
@@ -832,6 +849,130 @@ edited = Fake(Dirty=True, Update=lambda: None)
 reader._fresh_mass(edited, Fake(MassProperties=Fake()))
 check("recomputing the mass leaves a clean document clean, and an edited one as it was",
       clean.Dirty is False and edited.Dirty is True)
+
+print("review_assembly (fake Inventor objects):")
+flat_mod = importlib.import_module("inventor_mcp_server.flat_checks")
+
+
+def _part(name, **kw):
+    row = {"name": name, "file": "C:\\w\\" + name, "key": "C:\\w\\" + name, "dirty": False, "material": "Steel, Mild",
+           "mass": 1.5, "bodies": 1, "surfaces": 0, "overridden": False, "content": False,
+           "part_number": name[:-4], "description": "a part", "stock_number": "", "sheet": None}
+    row.update(kw)
+    return row
+
+
+def _l_profile(flange):
+    """The flat pattern of an L: a 100 mm long blank, one bend line `flange` mm from an edge (cm, as the rule gives it)."""
+    w = (50 + flange) / 10
+    f = flange / 10
+    strokes = lambda a, b: [a[0], a[1], 0.0, b[0], b[1], 0.0]   # x, y, z of each stroked point
+    corners = [(0, 0), (10, 0), (10, w), (0, w)]
+    return {"rule": "T15-V10", "thickness": 0.15, "has_flat": True, "length": 10.0, "width": w,
+            "outer": [strokes(corners[i], corners[(i + 1) % 4]) for i in range(4)], "holes": [],
+            "bends": [[0.0, f, 10.0, f, 0.1667, math.pi / 2, 1]], "skipped": 0}
+
+
+reviewer = api.InventorConnection()
+reviewer._app = Fake(ActiveDocument=Fake(DocumentType=12291, DisplayName="cabinet.iam",
+                                         ComponentDefinition=Fake(Constraints=Fake(Count=3))))
+reviewer._sick_constraints = lambda comp: ["Mate:7"]
+reviewer._read_parts = lambda flat=False: [
+    _part("plate.ipt"), _part("block.ipt", material="Generic"), _part("shell.ipt", surfaces=2, mass=0.1),
+    _part("bolt.ipt", content=True, material="Generic"), _part("door.ipt", part_number=" ", dirty=True),
+    _part("short.ipt", sheet=_l_profile(4)), _part("fine.ipt", sheet=_l_profile(30)),
+    _part("folded.ipt", sheet={"rule": "T15-V10", "thickness": 0.15, "has_flat": False})]
+two = [{"path": "base:1", "file": "base.ipt", "m": scan_mod.IDENTITY, "visible": True},
+       {"path": "bracket:1", "file": "bracket.ipt", "m": on_top[:11] + [2.1], "visible": True},
+       {"path": "ghost:1", "file": "base.ipt", "m": scan_mod.IDENTITY, "visible": False}]
+reviewer.scan_planar = lambda refresh=False: {"occurrences": two, "parts": {"base.ipt": base, "bracket.ipt": bracket},
+                                              "documents": {"base.ipt": {"dirty": False, "content": False},
+                                                            "bracket.ipt": {"dirty": False, "content": False}}}
+overlaps = {"parts": 2, "rows": [["base:1", "bracket:1", 0.25, 1.0, 1.0, 0.0, 2.0, 2.0, 0.2],
+                                 ["Lock:1/a:1", "Lock:1/b:1", 0.03, 0, 0, 0, 1, 1, 1],
+                                 ["Lock:2/a:1", "Lock:2/b:1", 0.03, 5, 0, 0, 6, 1, 1],
+                                 ["base:1", "pin:1", 0.0002, 0, 0, 0, 1, 1, 1]]}
+reviewer._inside = lambda rule, **kw: (overlaps if kw.get("what") == "interference"
+                                       else {"top": [["base:1", 0, 0, 0, 0, "base.ipt", 12290, -1]], "files": []})
+out = reviewer.review_assembly()
+texts = lambda key, check: [r["text"] for r in out[key] if r["check"] == check]
+check("the review answers with problems, things to look at, and what was not checked",
+      set(out) >= {"problems", "to_look_at", "not_checked", "checked"} and len(out["checked"]) == 6, str(out["checked"]))
+check("documents: Generic, surfaces and a missing part number are problems — Content Center parts are not ours",
+      [t.split(":")[0] for t in texts("problems", "documents")]
+      == ["1 part(s) have no material (Generic) — mass and BOM are wrong",
+          "1 part(s) are made of surfaces — no volume, mass too low (convert_surfaces_to_solid, or set the mass)",
+          "1 part(s) have no part number"]
+      and "block.ipt" in texts("problems", "documents")[0] and "bolt" not in " ".join(texts("problems", "documents")),
+      str(texts("problems", "documents")))
+check("documents: unsaved changes are something to look at",
+      any("unsaved changes" in t and "door.ipt" in t for t in texts("to_look_at", "documents")))
+sheet_lines = texts("problems", "sheet_metal")
+check("sheet metal: the short flange is a problem, the long one is not",
+      len(sheet_lines) == 1 and sheet_lines[0].startswith("short.ipt: Bend 1: only 4.0 mm of sheet")
+      and "needs 6.5 mm" in sheet_lines[0], str(sheet_lines))
+check("sheet metal: a part without a flat pattern is named as not checked, and nothing is unfolded",
+      any(t.startswith("folded.ipt: no flat pattern yet") for t in texts("not_checked", "sheet_metal"))
+      and "2 of 3 sheet metal part(s)" in out["checked"]["sheet_metal"], str(out["checked"]["sheet_metal"]))
+check("holes: the hole that is off is a problem; solid or nothing behind one is something to look at",
+      texts("problems", "holes") == ["Ø6.5 in base.ipt and Ø6.5 in bracket.ipt are 1.5 mm off — M5 still passes"]
+      and any("has solid material behind it" in t for t in texts("to_look_at", "holes"))
+      and any("has nothing behind it" in t for t in texts("to_look_at", "holes")), str(texts("problems", "holes")))
+check("clearance: flat faces 0.1 mm apart are a problem",
+      texts("problems", "clearance") == ["base.ipt and bracket.ipt are 0.1 mm apart — less than 0.3 mm, no room for the coat"],
+      str(texts("problems", "clearance")))
+check("interference: an overlap is a problem; inside a sub-assembly it is one line to look at; a sliver is counted",
+      texts("problems", "interference") == ["base and bracket overlap — up to 250 mm³"]
+      and [r["count"] for r in out["to_look_at"] if r["check"] == "interference"] == [2, 1]
+      and texts("to_look_at", "interference")[0].startswith("inside Lock: 1 pair(s) of its parts overlap"),
+      str(texts("problems", "interference") + texts("to_look_at", "interference")))
+check("constraints: an unsolved one is a problem; nothing grounded is something to look at",
+      texts("problems", "constraints") == ["1 constraint(s) Inventor can't solve: Mate:7"]
+      and texts("to_look_at", "constraints") == ["no component is grounded: the whole assembly can be dragged out of place"])
+check("what the checks can't see is said every time: hidden components, flat faces only",
+      any("1 hidden component(s)" in t for t in texts("not_checked", "holes"))
+      and any("only flat faces" in t for t in texts("not_checked", "holes"))
+      and any("only flat faces" in t for t in texts("not_checked", "clearance")))
+
+# silence must never read as "fine": with the rules off, the checks that need them are named
+reviewer._read_parts = lambda flat=False: None
+reviewer._inside = lambda rule, **kw: None
+
+
+def _no_rules(refresh=False):
+    raise RuntimeError("This reading runs inside Inventor (iLogic rules) and has no other way: through COM")
+
+
+reviewer.scan_planar = _no_rules
+off = reviewer.review_assembly()
+named = {r["check"] for r in off["not_checked"]}
+check("with the rules off every check that needs them is under not_checked, not silently empty",
+      named >= {"documents", "sheet_metal", "holes", "clearance", "interference", "constraints"}
+      and list(off["checked"]) == ["constraints"] and [r["check"] for r in off["problems"]] == ["constraints"],
+      str((sorted(named), list(off["checked"]))))
+some = reviewer.review_assembly(checks=["constraints"])
+check("a check that was not asked for is listed as not checked",
+      {r["check"] for r in some["not_checked"] if r["text"].startswith("not asked for")}
+      == {"documents", "sheet_metal", "holes", "clearance", "interference"})
+ok, why = raises(lambda: reviewer.review_assembly(checks=["welds"]), "Unknown check welds")
+check("an unknown check is refused", ok, why)
+reviewer._app = Fake(ActiveDocument=Fake(DocumentType=12290, DisplayName="plate.ipt"))
+ok, why = raises(lambda: reviewer.review_assembly(), "looks at an assembly")
+check("review_assembly on a part points at check_manufacturability", ok, why)
+rows = [{"k": "a"}, {"k": "a"}, {"k": "b"}, {"k": "c"}]
+grouped = reviewer._grouped(rows, lambda r: r["k"], lambda k, g: k, 2)
+check("lines that say the same are one line with a count; the rest is summed up",
+      [(g["text"], g["count"]) for g in grouped] == [("a", 2), ("b", 1), ("… and 1 more kinds", 1)], str(grouped))
+close = align.close_faces(two[:2], {"base.ipt": base, "bracket.ipt": bracket}, 0.3)
+check("flat faces closer than the clearance: one row per pair of parts; touching or far apart is none",
+      [(r["a"], r["b"], r["gap_mm"]) for r in close] == [("base:1", "bracket:1", 0.1)]
+      and align.close_faces(placed, {"base.ipt": base, "bracket.ipt": bracket}, 0.3) == []
+      and align.close_faces([two[0], dict(two[1], m=on_top[:11] + [2.4])], {"base.ipt": base, "bracket.ipt": bracket}, 0.3) == [])
+facts = flat_mod.sheet_facts(_l_profile(30))
+check("a flat pattern read by the rule becomes the facts the sheet metal check judges",
+      facts["thickness"] == 1.5 and facts["flat"] == [100.0, 80.0] and facts["bends"][0]["angle"] == 90.0
+      and facts["bends"][0]["a"] == (0.0, 30.0) and len(facts["outer"]) == 4 and facts["outer"][0] == [(0.0, 0.0), (100.0, 0.0)],
+      str(facts)[:200])
 
 print("Resources:")
 listed = asyncio.run(pkg.mcp.list_resources())

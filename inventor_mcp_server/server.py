@@ -2316,6 +2316,45 @@ def check_interference(set_a: str, set_b: str = "", ignore_fasteners: bool = Fal
     return (json.dumps(shown, indent=1, ensure_ascii=False) if shown else "No interference") + note
 
 
+@tool(read_only=True)
+def review_assembly(checks: str = "", clearance: float = 0.3, min_overlap: float = 1.0, v_die: float = 0,
+                    sheet: str = "", brake_length: float = 0, limit: int = 12) -> str:
+    """One look at the active assembly before it goes to the shop: everything that can be
+    checked without changing it, in one answer. Run it when a design is thought to be done.
+
+      documents     parts left on Generic material, without mass, made of surfaces, without a
+                    part number or description; parts with unsaved changes
+      sheet_metal   every sheet metal part on its flat pattern: rule against thickness, flanges
+                    and holes against the V die, the flat against the sheet (as check_manufacturability)
+      holes         holes and slots of parts that lie on each other: off, or a stud that does not fit
+      clearance     flat faces closer than `clearance` without touching — no room for the coat
+      interference  parts that overlap
+      constraints   constraints Inventor can't solve; nothing grounded
+
+    The answer has three lists. "problems": fix these. "to_look_at": may be meant (a hole with
+    solid sheet behind it, a small overlap at a thread). "not_checked": what this call did NOT
+    check, and why — a part without a flat pattern, hidden components, a reading that needs
+    Inventor's iLogic. An empty "problems" list means ready only as far as "not_checked" is empty.
+    Lines that say the same about many parts are one line with a count and one example
+    (`at`, assembly mm). Changes nothing: no part is unfolded, nothing is saved.
+    For one part in depth use check_manufacturability; for the full lists check_fastener_alignment
+    and check_interference.
+
+    Args:
+        checks: ","-separated names from the list above; empty = all of them.
+        clearance: Smallest gap in mm between faces that don't touch (0.3 for powder coat).
+        min_overlap: Overlaps under this volume (mm³) go to "to_look_at".
+        v_die: V die opening in mm for the sheet metal check; 0 = from each part's rule name
+               (T15-V10 → 10), else 8 x thickness.
+        sheet: Stock sheet for the flat patterns, e.g. "2500x1250"; empty = up to 3000x1500.
+        brake_length: Press brake length in mm; 0 = bend length is not checked.
+        limit: Lines per kind of finding.
+    """
+    names = [s.strip() for s in checks.split(",") if s.strip()] or None
+    return json.dumps(inv.review_assembly(names, clearance, min_overlap, v_die, sheet, brake_length, limit),
+                      indent=1, ensure_ascii=False)
+
+
 @tool()
 def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to_bend: float = 0,
                             sheet: str = "", brake_length: float = 0, clearance: float = 0.3,
@@ -2328,7 +2367,9 @@ def check_manufacturability(v_die: float = 0, min_flange: float = 0, min_hole_to
     V/2 + thickness, to the edge or to the next bend), holes too close to a bend line
     (nearer than V/2 they are pulled out of shape) and holes smaller than the thickness.
     Active assembly — parts closer than `clearance` without touching: no room for the
-    powder coat. Touching parts and fasteners are fine.
+    powder coat. Touching parts and fasteners are fine. Every pair of neighbouring parts is
+    measured, which is slow on a large assembly; review_assembly does a quick version of it
+    (flat faces only) together with the other checks.
     "problems" is what to fix; "notes" is what was assumed or left unchecked.
 
     Args:
