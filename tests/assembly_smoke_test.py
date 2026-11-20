@@ -197,6 +197,7 @@ def assembly_tests(inv, run, plate, pin):
 
     def seeded_review():
         """An assembly with one of each mistake: each must come back exactly once, and nothing may change."""
+        main = inv.app.ActiveDocument           # the smoke assembly: the steps after this one need it back
         folder = os.path.join(os.path.dirname(pin), "review")
         os.makedirs(folder, exist_ok=True)
         paths = {n: os.path.join(folder, n + ".ipt") for n in ("rv_plate", "rv_block", "rv_short")}
@@ -246,9 +247,14 @@ def assembly_tests(inv, run, plate, pin):
         after = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
         if after != before or inv.app.TransactionManager.CommittedTransactions.Count != steps:
             wrong.append(f"the review changed something: dirty {before} -> {after}")
+        for d in [d for d in inv.app.Documents if d.DisplayName.startswith("rv_")]:
+            try:
+                d.Close(True)
+            except Exception:
+                pass                            # a part goes with the assembly that holds it
+        main.Activate()
         if wrong:
             _raise("; ".join(wrong))
-        inv.app.ActiveDocument.Close(True)
         return f"{len(out['problems'])} problems, {len(out['to_look_at'])} to look at, {len(out['not_checked'])} not checked, {out['seconds']} s"
     run.step("review_assembly: one of each mistake, each found once, nothing changed", seeded_review)
 

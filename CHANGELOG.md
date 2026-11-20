@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`review_assembly`** — one look at an assembly before it goes to the shop, changing nothing:
+  parts left on Generic material or made of surfaces, every sheet metal part on its flat pattern,
+  holes that are off, flat faces with no room for the coat, overlaps, unsolved constraints. The
+  answer is three lists: `problems`, `to_look_at`, and `not_checked` — what this call did not
+  check and why (a part without a flat pattern, hidden components, a reading that needs iLogic),
+  so that an empty `problems` is never mistaken for "ready". The same finding on many parts is one
+  line with a count. 15 s on a 396-part assembly.
+- The material report and `check_manufacturability` on a part read inside Inventor: 26 s → under
+  a second for 85 parts, 3 to 9 s → 0.3 s for one flat pattern. Same answers, compared on 26
+  sheet metal parts; the COM code stays as the way back.
+- `capture_view` no longer leaves a clean document marked as changed (hiding sketches and
+  components for the picture set the flag).
+- A rule that does not run on some Inventor switches off only itself, not the other rules.
 ## 1.2.1 — 2026-11-17
 
 Faster reads and one fix; no tool is added or renamed (66).

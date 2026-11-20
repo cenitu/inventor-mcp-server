@@ -647,6 +647,16 @@ Measured on Inventor 2027.1, a 174-face part, every face, loop and edge read onc
 - **A ray that starts inside a solid** (`FindUsingRay`) reports where it leaves it, which
   reads like "nothing for 6 mm, then material": check the start point first.
 - `For Each … Step` — `Step` is a VB keyword; don't name a loop variable `step`.
+- **VB does not tell `r` from `R`.** A local `Dim r As FlatBendResult` hides a function `R()`
+  in the same rule, and `R(x)` then fails to compile ("cannot be indexed because it has no
+  default property"). To see why a rule does not compile, run it once with
+  `Automation.SilentOperation = False` and read the "Rule Compile Errors" dialog.
+- `CurveEvaluator.GetStrokes(from, to, tolerance, count, coordinates)` hands back x, y, z of
+  every stroked point in one flat array; `SurfaceBody`/`AssemblyComponentDefinition`
+  `.AnalyzeInterference(collection)` takes about 9 s for 396 parts inside Inventor, and reading
+  its 100 results is instant there (through COM each result costs a dozen calls).
+- **Hiding things for a picture marks the document dirty** (`ObjectVisibility`, `occurrence.Visible`),
+  like `Update()`. Put `Dirty` back when it was clean before.
 
 ## Flat pattern geometry
 
