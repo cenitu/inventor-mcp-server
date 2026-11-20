@@ -652,8 +652,8 @@ Measured on Inventor 2027.1, a 174-face part, every face, loop and edge read onc
   default property"). To see why a rule does not compile, run it once with
   `Automation.SilentOperation = False` and read the "Rule Compile Errors" dialog.
 - `CurveEvaluator.GetStrokes(from, to, tolerance, count, coordinates)` hands back x, y, z of
-  every stroked point in one flat array; `SurfaceBody`/`AssemblyComponentDefinition`
-  `.AnalyzeInterference(collection)` takes about 9 s for 396 parts inside Inventor, and reading
+  every stroked point in one flat array; `AssemblyComponentDefinition.AnalyzeInterference(collection)`
+  takes about 9 s for 396 parts inside Inventor, and reading
   its 100 results is instant there (through COM each result costs a dozen calls).
 - **Hiding things for a picture marks the document dirty** (`ObjectVisibility`, `occurrence.Visible`),
   like `Update()`. Put `Dirty` back when it was clean before.

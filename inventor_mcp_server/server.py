@@ -2327,8 +2327,10 @@ def review_assembly(checks: str = "", clearance: float = 0.3, min_overlap: float
       sheet_metal   every sheet metal part on its flat pattern: rule against thickness, flanges
                     and holes against the V die, the flat against the sheet (as check_manufacturability)
       holes         holes and slots of parts that lie on each other: off, or a stud that does not fit
-      clearance     flat faces closer than `clearance` without touching — no room for the coat
-      interference  parts that overlap
+      clearance     flat faces of two parts closer than `clearance` without touching — no room for
+                    the coat there (the parts may touch somewhere else)
+      interference  parts that overlap (inside a sub-assembly: one line for it; if its file is in a
+                    library or protected folder, a bought-in model, that line is only "to look at")
       constraints   constraints Inventor can't solve; nothing grounded
 
     The answer has three lists. "problems": fix these. "to_look_at": may be meant (a hole with

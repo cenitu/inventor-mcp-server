@@ -412,7 +412,9 @@ def check(occurrences: list, parts: dict, max_gap: float = 0.5, tolerance: float
 def close_faces(occurrences: list, parts: dict, clearance: float = 0.3, touching: float = 0.02) -> list:
     """Pairs of parts with flat faces that face each other, overlap, and are closer than
     clearance mm without touching (more than `touching` apart): no room for a coat of paint.
-    One row per pair of parts, with its smallest gap. Flat faces only."""
+    One row per pair of parts, with its smallest such gap. It is the gap between those faces:
+    on a real assembly a third of the pairs found this way touched somewhere else, so it does
+    not say the parts are apart. Flat faces only."""
     prepared, faces = {}, []
     for i, occ in enumerate(occurrences):
         part = parts.get(occ["file"])

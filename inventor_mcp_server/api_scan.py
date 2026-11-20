@@ -340,6 +340,15 @@ class ScanMixin:
             except Exception as e:
                 scan = str(e)
         slow = "this reading runs inside Inventor (iLogic rules), and they are off here: " + self.reading_mode()
+        walk = self._walk() if {"clearance", "interference", "constraints"} & set(wanted) else None
+        folders = self.library_folders()
+        first_level = {row[0]: row[5] for row in walk["top"]} if walk else {}
+
+        def bought_in(path: str) -> str:
+            """Why the first-level component this path starts with is not ours to fix ('' if it is):
+            its file sits in a library, Content Center or protected folder."""
+            source = first_level.get(path.split("/")[0], "")
+            return self._path_reason(_file_of(source), folders) if source else ""
 
         def documents():
             if parts_read is None:
@@ -431,6 +440,13 @@ class ScanMixin:
             unread = sorted({o["path"] for o in occs if o["file"] not in scan["parts"]})
             if unread:
                 add(unchecked, "holes", f"{len(unread)} component(s) could not be read: " + ", ".join(unread[:6]))
+            faceless = sorted({file_of[o["path"]] for o in occs
+                               if o["file"] in scan["parts"] and not scan["parts"][o["file"]].get("faces")})
+            if faceless:
+                n = sum(1 for o in occs if file_of[o["path"]] in faceless)
+                add(unchecked, "holes", f"{n} component(s) have no flat face of a solid (a model made of surfaces?) "
+                    f"and are left out of the hole and clearance checks: " + ", ".join(faceless[:limit])
+                    + (" …" if len(faceless) > limit else ""), count=n)
             add(unchecked, "holes", "only flat faces are compared: a hole with a curved part behind it reads as having "
                 "nothing behind it, and what sits inside a hole as its own part is not looked at")
             return (f"{found['aligned']} aligned, {len(found['engaged_rows'])} with a stud in them, "
@@ -443,13 +459,33 @@ class ScanMixin:
             occs = visible_parts()
             file_of = {o["path"]: base(o["file"]) for o in occs}
             rows = alignment.close_faces(occs, scan["parts"], clearance)
-            for g in self._grouped(rows, lambda r: (file_of[r["a"]], file_of[r["b"]], r["gap_mm"]),
-                                   lambda k, g: f"{k[0]} and {k[1]} are {k[2]:g} mm apart — less than {clearance:g} mm, "
-                                                "no room for the coat", limit):
+            name = lambda step: step.rsplit(":", 1)[0]
+
+            def home(r):
+                a, b = r["a"].split("/")[:-1], r["b"].split("/")[:-1]
+                shared = []
+                for x, y in zip(a, b):
+                    if x != y:
+                        break
+                    shared.append(name(x))
+                return "/".join(shared)
+            for g in self._grouped([r for r in rows if home(r)], home,
+                                   lambda k, g: f"inside {k}: flat faces of "
+                                                f"{len({(file_of[x['a']], file_of[x['b']]) for x in g})} pair(s) of its parts "
+                                                f"are {min(x['gap_mm'] for x in g):g} mm or a little more apart — less than "
+                                                f"{clearance:g} mm, no room for the coat", limit):
+                vendor = bought_in(g["example"]["a"])
+                add(look if vendor else problems, "clearance",
+                    g.pop("text") + (f" ({vendor}: bought-in, not coated here?)" if vendor else ""), **g)
+            for g in self._grouped([r for r in rows if not home(r)],
+                                   lambda r: (file_of[r["a"]], file_of[r["b"]], r["gap_mm"]),
+                                   lambda k, g: f"flat faces of {k[0]} and {k[1]} are {k[2]:g} mm apart — less than "
+                                                f"{clearance:g} mm, no room for the coat", limit):
                 add(problems, "clearance", g.pop("text"), **g)
-            add(unchecked, "clearance", "only flat faces that face each other are measured — "
-                "check_manufacturability on the assembly measures every pair of parts (slow)")
-            return f"{len(rows)} pair(s) of parts closer than {clearance:g} mm without touching"
+            add(unchecked, "clearance", "only flat faces that face each other are measured, face by face (two "
+                "parts may touch somewhere else) — check_manufacturability on the assembly measures the smallest "
+                "distance of every pair of parts (slow)")
+            return f"{len(rows)} pair(s) of parts with flat faces closer than {clearance:g} mm"
 
         def interference():
             got = self._inside("read_brep.iLogicVb", what="interference")
@@ -474,9 +510,16 @@ class ScanMixin:
             inside = [r for r in real if home(r)]
             for g in self._grouped(inside, home,
                                    lambda k, g: f"inside {k}: {len({pair(x) for x in g})} pair(s) of its parts overlap — "
-                                                f"up to {max(x['volume_mm3'] for x in g):g} mm³ (a bought-in model "
-                                                "often does; otherwise fix it there)", limit):
-                add(look, "interference", g.pop("text"), **g)
+                                                f"up to {max(x['volume_mm3'] for x in g):g} mm³", limit):
+                vendor = bought_in(g["example"]["a"])
+                add(look if vendor else problems, "interference",
+                    g.pop("text") + (f" ({vendor}: a bought-in model often does)" if vendor else ""), **g)
+            if parts_read is not None:
+                hollow = [r["name"] for r in parts_read if r["surfaces"] and not r["content"]]
+                if hollow:
+                    add(unchecked, "interference", f"{len(hollow)} part(s) are made of surfaces, not solids: an overlap "
+                        "with one of them is not found — " + ", ".join(hollow[:limit]) + (" …" if len(hollow) > limit else ""),
+                        count=len(hollow))
             for g in self._grouped([r for r in real if not home(r)], pair,
                                    lambda k, g: f"{k[0]} and {k[1]} overlap — up to "
                                                 f"{max(x['volume_mm3'] for x in g):g} mm³", limit):
@@ -493,7 +536,6 @@ class ScanMixin:
             if sick:
                 add(problems, "constraints", f"{len(sick)} constraint(s) Inventor can't solve: " + ", ".join(sick[:limit]),
                     count=len(sick))
-            walk = self._walk()
             if walk is None:
                 add(unchecked, "constraints", "whether a component is grounded — " + slow)
             elif walk["top"] and not any(row[4] for row in walk["top"]):

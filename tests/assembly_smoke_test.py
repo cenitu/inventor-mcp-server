@@ -247,6 +247,11 @@ def assembly_tests(inv, run, plate, pin):
         after = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
         if after != before or inv.app.TransactionManager.CommittedTransactions.Count != steps:
             wrong.append(f"the review changed something: dirty {before} -> {after}")
+        for path in inv.view_images(["iso"], 200, 150, isolate="rv_short:1"):   # a picture is a look, too
+            os.remove(path)
+        pictured = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
+        if pictured != before:
+            wrong.append(f"a picture left documents marked as changed: {pictured}")
         for d in [d for d in inv.app.Documents if d.DisplayName.startswith("rv_")]:
             try:
                 d.Close(True)

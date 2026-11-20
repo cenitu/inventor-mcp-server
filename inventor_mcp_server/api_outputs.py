@@ -303,7 +303,6 @@ class OutputsMixin:
         folders = self.library_folders()
         read = None if path else self._read_parts()     # inside Inventor; through COM it is a dozen calls a part
         if read is not None:
-            self._part_docs()                           # the same refusals as through COM
             rows = [self._part_row_read(r, folders) for r in read]
         else:
             rows = [self._part_row(d, folders) for d in self._part_docs(path)]

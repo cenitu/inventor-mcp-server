@@ -877,6 +877,7 @@ reviewer = api.InventorConnection()
 reviewer._app = Fake(ActiveDocument=Fake(DocumentType=12291, DisplayName="cabinet.iam",
                                          ComponentDefinition=Fake(Constraints=Fake(Count=3))))
 reviewer._sick_constraints = lambda comp: ["Mate:7"]
+reviewer.library_folders = lambda: []
 reviewer._read_parts = lambda flat=False: [
     _part("plate.ipt"), _part("block.ipt", material="Generic"), _part("shell.ipt", surfaces=2, mass=0.1),
     _part("bolt.ipt", content=True, material="Generic"), _part("door.ipt", part_number=" ", dirty=True),
@@ -919,13 +920,30 @@ check("holes: the hole that is off is a problem; solid or nothing behind one is 
       and any("has solid material behind it" in t for t in texts("to_look_at", "holes"))
       and any("has nothing behind it" in t for t in texts("to_look_at", "holes")), str(texts("problems", "holes")))
 check("clearance: flat faces 0.1 mm apart are a problem",
-      texts("problems", "clearance") == ["base.ipt and bracket.ipt are 0.1 mm apart — less than 0.3 mm, no room for the coat"],
+      texts("problems", "clearance") == ["flat faces of base.ipt and bracket.ipt are 0.1 mm apart — less than 0.3 mm, no room for the coat"],
       str(texts("problems", "clearance")))
-check("interference: an overlap is a problem; inside a sub-assembly it is one line to look at; a sliver is counted",
-      texts("problems", "interference") == ["base and bracket overlap — up to 250 mm³"]
-      and [r["count"] for r in out["to_look_at"] if r["check"] == "interference"] == [2, 1]
-      and texts("to_look_at", "interference")[0].startswith("inside Lock: 1 pair(s) of its parts overlap"),
+check("interference: an overlap is a problem; inside one of our sub-assemblies it is one line, still a problem",
+      texts("problems", "interference") == ["inside Lock: 1 pair(s) of its parts overlap — up to 30 mm³",
+                                            "base and bracket overlap — up to 250 mm³"]
+      and [r["count"] for r in out["problems"] if r["check"] == "interference"] == [2, 1]
+      and [r["count"] for r in out["to_look_at"] if r["check"] == "interference"] == [1],
       str(texts("problems", "interference") + texts("to_look_at", "interference")))
+check("interference: parts made of surfaces can't be seen overlapping, and that is said",
+      any("made of surfaces, not solids" in t and "shell.ipt" in t for t in texts("not_checked", "interference")))
+reviewer.library_folders = lambda: [os.path.normcase("C:\\lib")]
+reviewer._inside = lambda rule, **kw: (overlaps if kw.get("what") == "interference"
+                                       else {"top": [["base:1", 0, 0, 0, 1, "base.ipt", 12290, -1],
+                                                     ["Lock:1", 0, 0, 0, 0, "C:\\lib\\Lock.iam", 12291, 2],
+                                                     ["Lock:2", 0, 0, 0, 0, "C:\\lib\\Lock.iam", 12291, 2]], "files": []})
+vendor = reviewer.review_assembly(checks=["interference", "constraints"])
+check("…the same overlap inside a sub-assembly from a library folder is only something to look at",
+      [r["text"] for r in vendor["problems"] if r["check"] == "interference"] == ["base and bracket overlap — up to 250 mm³"]
+      and any(r["text"].startswith("inside Lock: 1 pair(s)") and "bought-in" in r["text"] for r in vendor["to_look_at"])
+      and not any("grounded" in r["text"] for r in vendor["to_look_at"]),
+      str([r["text"] for r in vendor["to_look_at"]]))
+reviewer.library_folders = lambda: []
+reviewer._inside = lambda rule, **kw: (overlaps if kw.get("what") == "interference"
+                                       else {"top": [["base:1", 0, 0, 0, 0, "base.ipt", 12290, -1]], "files": []})
 check("constraints: an unsolved one is a problem; nothing grounded is something to look at",
       texts("problems", "constraints") == ["1 constraint(s) Inventor can't solve: Mate:7"]
       and texts("to_look_at", "constraints") == ["no component is grounded: the whole assembly can be dragged out of place"])

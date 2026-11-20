@@ -8,9 +8,9 @@
   answer is three lists: `problems`, `to_look_at`, and `not_checked` — what this call did not
   check and why (a part without a flat pattern, hidden components, a reading that needs iLogic),
   so that an empty `problems` is never mistaken for "ready". The same finding on many parts is one
-  line with a count. 15 s on a 396-part assembly.
-- The material report and `check_manufacturability` on a part read inside Inventor: 26 s → under
-  a second for 85 parts, 3 to 9 s → 0.3 s for one flat pattern. Same answers, compared on 26
+  line with a count. 15 to 20 s on a 396-part assembly.
+- The material report and `check_manufacturability` on a part read inside Inventor: 17 s → 0.16 s
+  for 85 parts, 3 to 9 s → 0.3 s for one flat pattern. Same answers, compared on 26
   sheet metal parts; the COM code stays as the way back.
 - `capture_view` no longer leaves a clean document marked as changed (hiding sketches and
   components for the picture set the flag).
