@@ -407,3 +407,58 @@ def check(occurrences: list, parts: dict, max_gap: float = 0.5, tolerance: float
             "aligned": len(aligned), "misaligned": worst, "blocked": blocked, "open": opened,
             "engaged_rows": engaged, "stud_does_not_fit": sorted(misfit, key=lambda r: r["clearance_mm"]),
             "aligned_rows": list(aligned.values())}
+
+
+def close_faces(occurrences: list, parts: dict, clearance: float = 0.3, touching: float = 0.02) -> list:
+    """Pairs of parts with flat faces that face each other, overlap, and are closer than
+    clearance mm without touching (more than `touching` apart): no room for a coat of paint.
+    One row per pair of parts, with its smallest such gap. It is the gap between those faces:
+    on a real assembly a third of the pairs found this way touched somewhere else, so it does
+    not say the parts are apart. Flat faces only."""
+    prepared, faces = {}, []
+    for i, occ in enumerate(occurrences):
+        part = parts.get(occ["file"])
+        if part is None:
+            continue
+        if occ["file"] not in prepared:
+            prepared[occ["file"]] = prepare_part(part)
+        faces += place(prepared[occ["file"]], occ["m"], i)
+    step = max(clearance, 0.25) * 2
+    buckets = {}
+    for f in faces:
+        key, sgn = _direction_key(f["n"])
+        f["key"], f["level"] = key, f["d"] * sgn
+        buckets.setdefault((key, math.floor(f["level"] / step)), []).append(f)
+    reach = clearance + _EPS
+    found = {}
+    for f in faces:
+        cell = math.floor(f["level"] / step)
+        for k in (cell - 1, cell, cell + 1):
+            for g in buckets.get((f["key"], k), ()):
+                if g["occ"] <= f["occ"] or _dot(f["n"], g["n"]) > -0.999:
+                    continue
+                gap = -g["d"] - f["d"]
+                if not touching < gap < clearance - 1e-9:
+                    continue
+                if any(f["lo"][i] > g["hi"][i] + reach or g["lo"][i] > f["hi"][i] + reach for i in range(3)):
+                    continue
+                # do they overlap? a corner of one, moved onto the other's plane, lies inside it
+                spot = None
+                for a, _ in f["outline"]:
+                    q = (a[0] + f["n"][0] * gap, a[1] + f["n"][1] * gap, a[2] + f["n"][2] * gap)
+                    if covers(g, q):
+                        spot = a
+                        break
+                if spot is None:
+                    for a, _ in g["outline"]:
+                        q = (a[0] + g["n"][0] * gap, a[1] + g["n"][1] * gap, a[2] + g["n"][2] * gap)
+                        if covers(f, q):
+                            spot = a
+                            break
+                if spot is None:
+                    continue
+                pair = (f["occ"], g["occ"])
+                if pair not in found or gap < found[pair]["gap_mm"]:
+                    found[pair] = {"a": occurrences[f["occ"]]["path"], "b": occurrences[g["occ"]]["path"],
+                                   "gap_mm": round(gap, 3), "at": [round(c, 2) for c in spot]}
+    return sorted(found.values(), key=lambda r: r["gap_mm"])

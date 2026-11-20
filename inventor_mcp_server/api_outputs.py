@@ -1,10 +1,10 @@
 """What leaves the model: flat pattern, BOM, properties, drawings, and whether it can be made."""
 if __package__:
     from .api_common import *  # noqa: F401,F403
-    from .flat_checks import flat_pattern_problems, rule_from_name  # noqa: F401
+    from .flat_checks import flat_pattern_problems, rule_from_name, judge_sheet, sheet_facts, SHEETS  # noqa: F401
 else:  # server.py run as a script: the modules sit on sys.path
     from api_common import *  # noqa: F401,F403
-    from flat_checks import flat_pattern_problems, rule_from_name  # noqa: F401
+    from flat_checks import flat_pattern_problems, rule_from_name, judge_sheet, sheet_facts, SHEETS  # noqa: F401
 
 
 class OutputsMixin:
@@ -257,6 +257,21 @@ class OutputsMixin:
             row["library"] = why
         return row
 
+    def _part_row_read(self, r: dict, folders) -> dict:
+        """_part_row from what rules/read_parts.iLogicVb read."""
+        row = {"part": r["name"], "material": r["material"],
+               "mass_kg": None if r["mass"] is None else round(r["mass"], 3)}
+        if r["bodies"] >= 0:
+            row["bodies"] = r["bodies"]
+            if r["surfaces"]:
+                row["surface_bodies"] = r["surfaces"]
+        if r["overridden"]:
+            row["mass_overridden"] = True
+        why = "Content Center member" if r["content"] else (self._path_reason(r["file"], folders) if r["file"] else "")
+        if why:
+            row["library"] = why
+        return row
+
     @staticmethod
     def _surface_bodies(comp) -> int:
         """Bodies without volume: open shells among the solids, and surfaces (WorkSurfaces —
@@ -286,7 +301,11 @@ class OutputsMixin:
         grouped, with what needs a look: Generic material, surface bodies (their volume — and
         mass — is missing: set mass_kg), zero mass."""
         folders = self.library_folders()
-        rows = [self._part_row(d, folders) for d in self._part_docs(path)]
+        read = None if path else self._read_parts()     # inside Inventor; through COM it is a dozen calls a part
+        if read is not None:
+            rows = [self._part_row_read(r, folders) for r in read]
+        else:
+            rows = [self._part_row(d, folders) for d in self._part_docs(path)]
         problems = []
         for r in rows:
             why = []
@@ -721,7 +740,7 @@ class OutputsMixin:
 
     # ---------- Can it be made? ----------
 
-    _SHEETS = ((2000, 1000), (2500, 1250), (3000, 1500))
+    _SHEETS = SHEETS
 
     def _strokes(self, edge) -> list:
         """An edge as a polyline of (x, y) in mm (flat pattern edges lie in one plane)."""
@@ -765,64 +784,35 @@ class OutputsMixin:
                 skipped += 1  # a rolled bend has no straight centre line
         return outer, holes, bends, skipped
 
+    def _sheet_facts_com(self, comp) -> dict:
+        """Rule, thickness and flat pattern of a sheet metal part that has one, read through COM."""
+        fp = comp.FlatPattern
+        outer, holes, bends, skipped = self._flat_geometry(comp)
+        return {"rule": comp.ActiveSheetMetalStyle.Name, "thickness": round(comp.Thickness.Value * 10, 3),
+                "has_flat": True,
+                "flat": sorted((round(fp.Length * 10, 2), round(fp.Width * 10, 2)), reverse=True),
+                "outer": outer, "holes": holes, "bends": bends, "skipped": skipped}
+
     def check_sheet_metal_part(self, v_die: float = 0, min_flange: float = 0, min_hole_to_bend: float = 0,
                                sheet: str = "", brake_length: float = 0) -> dict:
         """Can the active sheet metal part be cut and bent? Rule, flat size against the
-        sheet, flange lengths and holes against the V die."""
+        sheet, flange lengths and holes against the V die. Unfolds the part if it has no flat
+        pattern yet; the flat pattern is read inside Inventor when that is possible."""
         doc = self.active_document()
         comp = doc.ComponentDefinition
         if not hasattr(comp, "HasFlatPattern"):
             raise RuntimeError(f"{doc.DisplayName} is not a sheet metal part.")
-        problems, notes = [], []
         t = round(comp.Thickness.Value * 10, 3)
         rule = comp.ActiveSheetMetalStyle.Name
-        named = rule_from_name(rule)
-        if named:
-            if abs(named[0] - t) > 1e-3:
-                problems.append(f"Rule {rule} is for {named[0]:g} mm sheet but the part is {t:g} mm — "
-                                "activate the rule for this thickness instead of overriding the thickness")
-            die = v_die or named[1]
-        else:
-            die = v_die or 8 * t
-            notes.append(f"Rule '{rule}' is not a TXX-VYY shop rule" + (
-                "" if v_die else f"; a V{die:g} die (8 x thickness) is assumed — pass v_die for the real one"))
         try:
             self.flat_pattern()
         except Exception as e:
-            return {"part": doc.DisplayName, "rule": rule, "thickness_mm": t,
-                    "problems": problems + [f"No flat pattern: {describe_com_error(e)} — the part can't be "
-                                            "unfolded as modelled"], "notes": notes}
-        fp = comp.FlatPattern
-        flat = sorted((round(fp.Length * 10, 2), round(fp.Width * 10, 2)), reverse=True)
-        outer, holes, bends, skipped = self._flat_geometry(comp)
-        if skipped:
-            notes.append(f"{skipped} bend(s) without a straight bend line were not checked")
-        for b in bends:
-            if named and abs(b["radius"] - die / 6) > 0.05 and abs(b["angle"] - 90) < 45:
-                notes.append(f"A {b['angle']:g}° bend has R{b['radius']:g}; a V{die:g} die gives about "
-                             f"R{die / 6:.2f} (V/6)")
-                break
-        found = flat_pattern_problems(outer, holes, bends, t, die, min_flange, min_hole_to_bend)
-        problems += found["problems"]
-        if sheet:
-            size = sorted((float(v) for v in sheet.lower().replace(" ", "").split("x")), reverse=True)
-            if flat[0] > size[0] or flat[1] > size[1]:
-                problems.append(f"Flat pattern {flat[0]:g} x {flat[1]:g} mm does not fit a "
-                                f"{size[0]:g} x {size[1]:g} mm sheet")
-            fits = f"{size[0]:g} x {size[1]:g}"
-        else:
-            fits = next((f"{a} x {b}" for a, b in self._SHEETS if flat[0] <= a and flat[1] <= b), None)
-            if fits is None:
-                problems.append(f"Flat pattern {flat[0]:g} x {flat[1]:g} mm is larger than a 3000 x 1500 sheet")
-        longest = max((b["length_mm"] for b in found["bends"]), default=0)
-        if brake_length and longest > brake_length:
-            problems.append(f"The longest bend is {longest:g} mm — more than the {brake_length:g} mm press brake")
-        return {"part": doc.DisplayName, "rule": rule, "thickness_mm": t, "v_die_mm": die,
-                "flat_mm": flat, "smallest_sheet_mm": fits, "holes": len(holes),
-                "min_flange_mm": found["min_flange_mm"], "bends": [
-                    {**leg, "angle": b["angle"], "radius_mm": b["radius"], "direction": "up" if b["up"] else "down"}
-                    for leg, b in zip(found["bends"], bends)],
-                "problems": problems, "notes": notes}
+            return judge_sheet(doc.DisplayName, {"rule": rule, "thickness": t}, v_die, min_flange,
+                               min_hole_to_bend, sheet, brake_length, flat_error=describe_com_error(e))
+        rows = self._read_parts(flat=True)
+        read = rows[0].get("sheet") if rows else None
+        facts = sheet_facts(read) if read and "outer" in read else self._sheet_facts_com(comp)
+        return judge_sheet(doc.DisplayName, facts, v_die, min_flange, min_hole_to_bend, sheet, brake_length)
 
     def check_clearances(self, clearance: float = 0.3, parts: list[str] | None = None,
                          max_pairs: int = 600) -> dict:

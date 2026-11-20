@@ -10,8 +10,9 @@
 ' The result is JSON in the argument "result"; the rule writes no file (see scan_planar).
 '
 ' Arguments:
-'   what   "faces", "edges" or "walk" (walk: the first-level components, and the file of
-'          every part occurrence at any depth)
+'   what   "faces", "edges", "walk" (the first-level components, and the file of every part
+'          occurrence at any depth) or "interference" (overlaps between the visible parts that
+'          are not Content Center members: [path, path, volume cm3, box min x y z, max x y z])
 '   path   assembly only: component name, path ("Sub:1/Part:1") or index; not for "walk"
 '
 ' faces: one array per face  [surfaceType, area, minX, minY, minZ, maxX, maxY, maxZ, ...]
@@ -24,7 +25,33 @@ Sub Main()
     Try
         Dim doc As Inventor.Document = ThisDoc.Document
         Dim what As String = CStr(RuleArguments("what"))
-        If what = "walk" Then
+        If what = "interference" Then
+            Dim asmI As AssemblyDocument = doc
+            Dim parts As ObjectCollection = ThisApplication.TransientObjects.CreateObjectCollection()
+            For Each o As ComponentOccurrence In asmI.ComponentDefinition.Occurrences.AllLeafOccurrences
+                Dim leaveOut As Boolean = False
+                Try
+                    If Not o.Visible Then leaveOut = True
+                    If o.Definition.IsContentMember Then leaveOut = True
+                Catch
+                End Try
+                If Not leaveOut Then parts.Add(o)
+            Next
+            sb.Append("{""parts"":").Append(parts.Count.ToString()).Append(",""rows"":[")
+            If parts.Count > 1 Then
+                Dim found As InterferenceResults = asmI.ComponentDefinition.AnalyzeInterference(parts)
+                For i As Integer = 1 To found.Count
+                    Dim hit As InterferenceResult = found.Item(i)
+                    Dim box As Box = hit.InterferenceBody.RangeBox
+                    If i > 1 Then sb.Append(",")
+                    sb.Append("[").Append(Q(PathOf(hit.OccurrenceOne))).Append(",").Append(Q(PathOf(hit.OccurrenceTwo)))
+                    sb.Append(",").Append(R(hit.Volume))
+                    sb.Append(",").Append(R(box.MinPoint.X)).Append(",").Append(R(box.MinPoint.Y)).Append(",").Append(R(box.MinPoint.Z))
+                    sb.Append(",").Append(R(box.MaxPoint.X)).Append(",").Append(R(box.MaxPoint.Y)).Append(",").Append(R(box.MaxPoint.Z)).Append("]")
+                Next
+            End If
+            sb.Append("]}")
+        ElseIf what = "walk" Then
             Dim asmDoc As AssemblyDocument = doc
             ' first-level components: [name, x, y, z (cm), grounded, file, document type, parts inside or -1]
             sb.Append("{""top"":[")
@@ -92,6 +119,19 @@ Sub Main()
     End Try
     RuleArguments.Arguments.Value("result") = sb.ToString()
 End Sub
+
+Function PathOf(o As ComponentOccurrence) As String
+    Dim path As String = ""
+    Try
+        For Each link As ComponentOccurrence In o.OccurrencePath
+            If path.Length > 0 Then path &= "/"
+            path &= link.Name
+        Next
+    Catch
+        path = o.Name
+    End Try
+    Return path
+End Function
 
 ' The occurrence a path names, found the way InventorConnection._occ finds it.
 Function Find(comp As AssemblyComponentDefinition, path As String) As ComponentOccurrence

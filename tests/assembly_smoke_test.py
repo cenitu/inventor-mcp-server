@@ -195,6 +195,74 @@ def assembly_tests(inv, run, plate, pin):
             inv.delete_occurrence("smoke_plate:2", force=True)
     run.step("fastener_alignment: aligned, cached, then 2 mm off", hole_alignment)
 
+    def seeded_review():
+        """An assembly with one of each mistake: each must come back exactly once, and nothing may change."""
+        main = inv.app.ActiveDocument           # the smoke assembly: the steps after this one need it back
+        folder = os.path.join(os.path.dirname(pin), "review")
+        os.makedirs(folder, exist_ok=True)
+        paths = {n: os.path.join(folder, n + ".ipt") for n in ("rv_plate", "rv_block", "rv_short")}
+        inv.create_part("rv_plate")
+        inv.create_sketch("XY")
+        inv.draw_rectangle(50, 30, 100, 60)
+        inv.extrude(5)
+        inv.hole(20, 20, diameter=6)
+        inv.save_document(paths["rv_plate"], overwrite=True)
+        inv.create_part("rv_block")
+        inv.create_sketch("XY")
+        inv.draw_rectangle(0, 0, 10, 10)
+        inv.extrude(5)
+        inv.save_document(paths["rv_block"], overwrite=True)
+        inv.create_part("rv_short", "sheet_metal")
+        inv.set_sheet_metal_thickness(2)
+        inv.sheet_profile("L", 60, 7, 100)
+        inv.flat_pattern()                      # unfolded beforehand: the review itself unfolds nothing
+        inv.save_document(paths["rv_short"], overwrite=True)
+        inv.create_assembly("rv_asm")
+        inv.place_component(paths["rv_plate"], 0, 0, 0, True)
+        inv.place_component(paths["rv_plate"], 2, 0, 5)        # on top, its hole 2 mm off
+        inv.place_component(paths["rv_plate"], 2, 0, 10.1)     # 0.1 mm above that one, holes in line
+        inv.place_component(paths["rv_block"], 102, 30, 0)     # sticks 3 mm into the first plate's end
+        inv.place_component(paths["rv_short"], 400, 0, 0)
+        asm = os.path.join(folder, "rv_asm.iam")
+        inv.save_document(asm, overwrite=True, save_dependents=True)
+        before = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
+        steps = inv.app.TransactionManager.CommittedTransactions.Count
+        out = inv.review_assembly()
+        lines = lambda key, check: [r["text"] for r in out[key] if r["check"] == check]
+        wrong = []
+        if len(out["checked"]) != 6:
+            wrong.append(f"checks that ran: {out['checked']}")
+        if not (len(lines("problems", "holes")) == 1 and "2 mm off" in lines("problems", "holes")[0]):
+            wrong.append(f"holes: {lines('problems', 'holes')}")
+        if not (len(lines("problems", "clearance")) == 1 and "0.1 mm apart" in lines("problems", "clearance")[0]):
+            wrong.append(f"clearance: {lines('problems', 'clearance')}")
+        if not (len(lines("problems", "interference")) == 1 and "rv_block" in lines("problems", "interference")[0]):
+            wrong.append(f"interference: {lines('problems', 'interference')}")
+        generic = [t for t in lines("problems", "documents") if "Generic" in t]
+        if not (len(generic) == 1 and "rv_block" in generic[0]):
+            wrong.append(f"documents: {lines('problems', 'documents')}")
+        short = lines("problems", "sheet_metal")
+        if not (len(short) == 1 and short[0].startswith("rv_short") and "of sheet to the edge" in short[0]):
+            wrong.append(f"sheet metal: {short}")
+        after = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
+        if after != before or inv.app.TransactionManager.CommittedTransactions.Count != steps:
+            wrong.append(f"the review changed something: dirty {before} -> {after}")
+        for path in inv.view_images(["iso"], 200, 150, isolate="rv_short:1"):   # a picture is a look, too
+            os.remove(path)
+        pictured = sorted(d.DisplayName for d in inv.app.Documents if d.Dirty)
+        if pictured != before:
+            wrong.append(f"a picture left documents marked as changed: {pictured}")
+        for d in [d for d in inv.app.Documents if d.DisplayName.startswith("rv_")]:
+            try:
+                d.Close(True)
+            except Exception:
+                pass                            # a part goes with the assembly that holds it
+        main.Activate()
+        if wrong:
+            _raise("; ".join(wrong))
+        return f"{len(out['problems'])} problems, {len(out['to_look_at'])} to look at, {len(out['not_checked'])} not checked, {out['seconds']} s"
+    run.step("review_assembly: one of each mistake, each found once, nothing changed", seeded_review)
+
     def same_either_way():
         """What is read inside Inventor is what the COM code reads: rows, refs, order."""
         if not inv.reading_mode().startswith("inside"):

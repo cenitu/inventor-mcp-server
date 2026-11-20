@@ -89,6 +89,10 @@ class ViewsMixin:
         view = self.app.ActiveView
         cam = view.Camera
         saved = (cam.Eye, cam.Target, cam.UpVector, cam.Perspective)
+        try:   # hiding sketches and components for the picture sets the flag; nothing was edited
+            clean = not self.app.ActiveDocument.Dirty
+        except Exception:
+            clean = False
         box = self._occurrence_box(focus) if focus else None
         hidden = self._isolate(isolate) if isolate else []
         colors = ()
@@ -142,6 +146,12 @@ class ViewsMixin:
             for prop, value in shown.items():
                 try:
                     setattr(self.app.ActiveDocument.ObjectVisibility, prop, value)
+                except Exception:
+                    pass
+            if clean:
+                try:
+                    if self.app.ActiveDocument.Dirty:
+                        self.app.ActiveDocument.Dirty = False
                 except Exception:
                     pass
         return paths

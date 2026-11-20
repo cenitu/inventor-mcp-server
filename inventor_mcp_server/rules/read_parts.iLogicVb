@@ -1,0 +1,264 @@
+' Every different part of the active assembly (or the active part): what the material report
+' and the sheet metal check read, read inside Inventor. Run by inventor_mcp_server/api_scan.py.
+' Through COM the same reading took 26 s for 85 parts, and 10 s for one flat pattern (measured).
+'
+' Parts come in the order InventorConnection._part_docs gives them (first occurrence), and the
+' numbers are handed back unrounded (cm, kg, radians): Python rounds, as it does for COM.
+' Nothing is changed; a part without a flat pattern is not unfolded.
+'
+' The result is JSON in the argument "result"; the rule writes no file (see scan_planar).
+'
+' Arguments:
+'   flat   optional, "1": for sheet metal parts that have a flat pattern, also its contour,
+'          holes and bend lines
+
+Sub Main()
+    Dim sb As New System.Text.StringBuilder()
+    Try
+        Dim doc As Inventor.Document = ThisDoc.Document
+        Dim withFlat As Boolean = RuleArguments.Exists("flat")
+        Dim docs As New System.Collections.Generic.List(Of Inventor.Document)
+        If doc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+            docs.Add(doc)
+        Else
+            Dim asm As AssemblyDocument = doc
+            Dim seen As New System.Collections.Generic.HashSet(Of String)
+            For Each o As ComponentOccurrence In asm.ComponentDefinition.Occurrences.AllLeafOccurrences
+                Dim d As Inventor.Document = Nothing
+                Try
+                    d = o.Definition.Document
+                Catch
+                End Try
+                If d Is Nothing Then Continue For
+                Dim key As String = d.FullFileName
+                If key = "" Then key = d.DisplayName
+                If d.DocumentType = DocumentTypeEnum.kPartDocumentObject AndAlso seen.Add(key) Then docs.Add(d)
+            Next
+        End If
+        sb.Append("{""parts"":[")
+        For i As Integer = 0 To docs.Count - 1
+            If i > 0 Then sb.Append(",")
+            AppendPart(sb, docs(i), withFlat)
+        Next
+        sb.Append("]}")
+    Catch ex As Exception
+        sb.Clear()
+        sb.Append("{""error"":").Append(Q(ex.Message)).Append("}")
+    End Try
+    RuleArguments.Arguments.Value("result") = sb.ToString()
+End Sub
+
+Sub AppendPart(sb As System.Text.StringBuilder, d As Inventor.Document, withFlat As Boolean)
+    Dim part As PartDocument = d
+    Dim comp As PartComponentDefinition = part.ComponentDefinition
+    sb.Append("{""name"":").Append(Q(d.DisplayName)).Append(",""file"":").Append(Q(d.FullFileName))
+    sb.Append(",""key"":").Append(Q(Key(d))).Append(",""dirty"":").Append(B(d.Dirty))
+
+    ' material: as InventorConnection._material_name
+    Dim material As String = "?"
+    Try
+        material = part.ActiveMaterial.DisplayName
+    Catch
+        Try
+            material = comp.Material.Name
+        Catch
+        End Try
+    End Try
+    sb.Append(",""material"":").Append(Q(material))
+
+    sb.Append(",""mass"":")
+    Try
+        sb.Append(R(comp.MassProperties.Mass))
+    Catch
+        sb.Append("null")
+    End Try
+
+    ' bodies and bodies without volume: as InventorConnection._part_row / _surface_bodies
+    Dim bodies As Integer = -1
+    Dim surfaces As Integer = 0
+    Try
+        Dim solids As Integer = comp.SurfaceBodies.Count
+        Dim noVolume As Integer = 0
+        For Each b As SurfaceBody In comp.SurfaceBodies
+            If Not b.IsSolid Then noVolume += 1
+        Next
+        Try
+            For Each ws As WorkSurface In comp.WorkSurfaces
+                noVolume += ws.SurfaceBodies.Count
+            Next
+        Catch
+        End Try
+        bodies = solids
+        surfaces = noVolume
+    Catch
+    End Try
+    sb.Append(",""bodies"":").Append(bodies.ToString()).Append(",""surfaces"":").Append(surfaces.ToString())
+
+    Dim overridden As Boolean = False
+    Try
+        overridden = comp.MassProperties.MassOverridden
+    Catch
+    End Try
+    sb.Append(",""overridden"":").Append(B(overridden))
+
+    Dim content As Boolean = False
+    Try
+        content = comp.IsContentMember
+    Catch
+    End Try
+    sb.Append(",""content"":").Append(B(content))
+
+    sb.Append(",""part_number"":").Append(Q(Prop(d, "Part Number")))
+    sb.Append(",""description"":").Append(Q(Prop(d, "Description")))
+    sb.Append(",""stock_number"":").Append(Q(Prop(d, "Stock Number")))
+
+    sb.Append(",""sheet"":")
+    If d.SubType = "{9C464203-9BAE-11D3-8BAD-0060B0CE6BB4}" Then
+        Try
+            Dim one As New System.Text.StringBuilder()
+            AppendSheet(one, comp, withFlat)
+            sb.Append(one.ToString())
+        Catch ex As Exception
+            sb.Append("{""error"":").Append(Q(ex.Message)).Append("}")
+        End Try
+    Else
+        sb.Append("null")
+    End If
+    sb.Append("}")
+End Sub
+
+Sub AppendSheet(sb As System.Text.StringBuilder, part As PartComponentDefinition, withFlat As Boolean)
+    Dim comp As SheetMetalComponentDefinition = part
+    sb.Append("{""rule"":").Append(Q(comp.ActiveSheetMetalStyle.Name))
+    sb.Append(",""thickness"":").Append(R(comp.Thickness.Value))
+    sb.Append(",""has_flat"":").Append(B(comp.HasFlatPattern))
+    If comp.HasFlatPattern Then
+        Dim fp As FlatPattern = comp.FlatPattern
+        sb.Append(",""length"":").Append(R(fp.Length)).Append(",""width"":").Append(R(fp.Width))
+        If withFlat Then
+            ' as InventorConnection._flat_geometry: the top face's loops, then the bend results
+            Dim outer As New System.Text.StringBuilder()
+            Dim holes As New System.Text.StringBuilder()
+            Dim top As Face = fp.TopFace
+            For li As Integer = 1 To top.EdgeLoops.Count
+                Dim lp As EdgeLoop = top.EdgeLoops.Item(li)
+                Dim lines As New System.Text.StringBuilder()
+                For ei As Integer = 1 To lp.Edges.Count
+                    If ei > 1 Then lines.Append(",")
+                    lines.Append(Strokes(lp.Edges.Item(ei)))
+                Next
+                If lp.IsOuterEdgeLoop Then
+                    If outer.Length > 0 Then outer.Append(",")
+                    outer.Append(lines.ToString())
+                Else
+                    If holes.Length > 0 Then holes.Append(",")
+                    holes.Append("{""lines"":[").Append(lines.ToString()).Append("],""radius"":")
+                    If lp.Edges.Count = 1 AndAlso CInt(lp.Edges.Item(1).GeometryType) = 5124 Then
+                        Dim c As Inventor.Circle = lp.Edges.Item(1).Geometry
+                        holes.Append(R(c.Radius))
+                    Else
+                        holes.Append("null")
+                    End If
+                    holes.Append("}")
+                End If
+            Next
+            sb.Append(",""outer"":[").Append(outer.ToString()).Append("],""holes"":[").Append(holes.ToString()).Append("]")
+
+            sb.Append(",""bends"":[")
+            Dim firstBend As Boolean = True
+            Dim skipped As Integer = 0
+            Dim results As FlatBendResults = fp.FlatBendResults
+            For bi As Integer = 1 To results.Count
+                ' (not "r": VB does not tell r from R, and R() below formats the numbers)
+                Dim bend As FlatBendResult = results.Item(bi)
+                Dim bottom As Boolean = False
+                Try
+                    bottom = bend.IsOnBottomFace
+                Catch
+                End Try
+                If bottom Then Continue For
+                Try
+                    Dim e As Edge = bend.Edge
+                    Dim a As Inventor.Point = e.StartVertex.Point
+                    Dim b As Inventor.Point = e.StopVertex.Point
+                    Dim one As String = "[" & R(a.X) & "," & R(a.Y) & "," & R(b.X) & "," & R(b.Y) & "," & R(bend.InnerRadius) & "," & R(bend.Angle) & "," & If(bend.IsDirectionUp, "1", "0") & "]"
+                    If Not firstBend Then sb.Append(",")
+                    firstBend = False
+                    sb.Append(one)
+                Catch
+                    skipped += 1
+                End Try
+            Next
+            sb.Append("],""skipped"":").Append(skipped.ToString())
+        End If
+    End If
+    sb.Append("}")
+End Sub
+
+' An edge as Curve evaluator strokes at 0.002 cm, the flat array of coordinates as the API gives it.
+Function Strokes(e As Edge) As String
+    Dim ev As CurveEvaluator = e.Evaluator
+    Dim lo As Double = 0
+    Dim hi As Double = 0
+    ev.GetParamExtents(lo, hi)
+    Dim count As Integer = 0
+    Dim coords() As Double = {}
+    ev.GetStrokes(lo, hi, 0.002, count, coords)
+    Dim sb As New System.Text.StringBuilder("[")
+    For i As Integer = 0 To coords.Length - 1
+        If i > 0 Then sb.Append(",")
+        sb.Append(R(coords(i)))
+    Next
+    sb.Append("]")
+    Return sb.ToString()
+End Function
+
+Function Prop(d As Inventor.Document, name As String) As String
+    Try
+        Dim v As Object = d.PropertySets.Item("Design Tracking Properties").Item(name).Value
+        If v Is Nothing Then Return ""
+        Return CStr(v)
+    Catch
+        Return ""
+    End Try
+End Function
+
+' One name per document (see scan_planar): the full document name, or for a never-saved part its internal name.
+Function Key(d As Inventor.Document) As String
+    Dim name As String = ""
+    Try
+        name = d.FullDocumentName
+    Catch
+    End Try
+    If name = "" Then name = d.FullFileName
+    If name = "" Then name = "unsaved:" & d.InternalName
+    Return name
+End Function
+
+Function R(v As Double) As String
+    Return v.ToString("G17", System.Globalization.CultureInfo.InvariantCulture)
+End Function
+
+Function B(v As Boolean) As String
+    Return If(v, "true", "false")
+End Function
+
+Function Q(s As String) As String
+    Dim sb As New System.Text.StringBuilder("""")
+    For Each ch As Char In s
+        Select Case ch
+            Case """"c
+                sb.Append("\""")
+            Case "\"c
+                sb.Append("\\")
+            Case Else
+                If AscW(ch) < 32 Then
+                    sb.Append("\u" & AscW(ch).ToString("x4"))
+                Else
+                    sb.Append(ch)
+                End If
+        End Select
+    Next
+    sb.Append("""")
+    Return sb.ToString()
+End Function
